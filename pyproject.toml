@@ -50,6 +50,12 @@ chatterbox-local = [
     "torch>=2.2",
     "torchaudio>=2.2",
     "torchvision>=0.17",
+    # chatterbox-tts's transitive dep resemble-perth imports `pkg_resources`
+    # at import time without a try/except; setuptools>=80 no longer ships
+    # pkg_resources, which breaks model loading with
+    # `TypeError: 'NoneType' object is not callable` on
+    # perth.PerthImplicitWatermarker(). Pin below that removal.
+    "setuptools<80",
 ]
 
 [tool.hatch.build.targets.wheel]
