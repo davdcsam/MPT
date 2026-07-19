@@ -17,3 +17,7 @@ requests==2.33.1
 socksio==1.0.0
 pydub==0.25.1
 litellm==1.86.2
+# Optional: Chatterbox TTS (in-process, local model) — heavy deps (torch,
+# torchaudio, chatterbox-tts, ~3GB model download on first use). Install via
+# `uv sync --extra chatterbox-local` (see pyproject.toml); intentionally not
+# listed here to keep this legacy requirements.txt install path lightweight.

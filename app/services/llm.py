@@ -570,6 +570,14 @@ def _generate_response(prompt: str) -> str:
         return f"Error: {_sanitize_error_message(e)}"
 
 
+def generate_text_response(prompt: str) -> str:
+    """Public wrapper around `_generate_response` for callers outside this module
+    (e.g. the Chatterbox-local tone-planning stage) that need a plain-text
+    completion from whichever LLM provider `[app] llm_provider` is configured to
+    use, without duplicating the provider dispatch logic above."""
+    return _generate_response(prompt)
+
+
 def _limit_script_text(text: str | None, max_length: int, field_name: str) -> str:
     value = (text or "").strip()
     if len(value) <= max_length:
