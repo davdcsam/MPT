@@ -409,6 +409,7 @@ if not config.app.get("hide_config", False):
                 ("MiMo", "mimo"),
                 ("Pollinations", "pollinations"),
                 ("LiteLLM", "litellm"),
+                ("G4F (gpt4free)", "g4f"),
             ]
             llm_provider_ids = [provider_id for _, provider_id in llm_provider_options]
             llm_provider_labels = {
@@ -544,10 +545,29 @@ if not config.app.get("hide_config", False):
                 if not llm_model_name:
                     llm_model_name = "openai/gpt-4o-mini"
 
+            if llm_provider == "g4f":
+                if not llm_model_name:
+                    llm_model_name = "gpt-4"
+
             tips = get_llm_provider_tips(llm_provider, **provider_tip_context)
             if tips:
                 with llm_helper:
                     st.info(tips)
+
+            if llm_provider == "g4f":
+                st.warning(
+                    tr(
+                        "g4f relies on reverse-engineered third-party endpoints, "
+                        "not an official API. No API key is required, but it may "
+                        "be unstable and carries supply-chain and terms-of-service "
+                        "risks. Only enable it if you understand and accept these "
+                        "risks."
+                    )
+                )
+                config.app["enable_g4f"] = st.checkbox(
+                    tr("Enable g4f (I understand the risks)"),
+                    value=config.app.get("enable_g4f", False),
+                )
 
             st_llm_api_key = st.text_input(
                 tr("API Key"), value=llm_api_key, type="password"

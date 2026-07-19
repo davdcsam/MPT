@@ -92,7 +92,20 @@ twelvelabs_rerank_terms = false
 #   ernie       (文心一言)
 #   modelscope  (魔搭社区)
 #   litellm     (100+ providers via LiteLLM gateway)
+#   g4f         (gpt4free, reverse-engineered free endpoints - see warning below)
 llm_provider = "moonshot"
+
+########## gpt4free (g4f) Settings
+# g4f relies on reverse-engineered third-party endpoints, not an official API.
+# No API key required, but it may be unstable and carries supply-chain and
+# terms-of-service risks. Disabled by default - only enable if you understand
+# and accept these risks. Requires the optional dependency:
+#   uv sync --extra g4f
+enable_g4f = false
+# Leave empty to use the default model (gpt-4). Free g4f model availability
+# shifts often since it relies on reverse-engineered endpoints - if the
+# default stops working, try another model id (e.g. "gpt-4o", "gpt-3.5-turbo").
+g4f_model_name = ""
 
 ########## Pollinations AI Settings
 # Visit https://pollinations.ai/ to learn more

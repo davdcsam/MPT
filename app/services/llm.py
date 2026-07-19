@@ -281,6 +281,42 @@ def _generate_response(prompt: str) -> str:
                 raise ValueError(
                     f"{llm_provider}: secret_key is not set, please set it in the config.toml file."
                 )
+        elif llm_provider == "g4f":
+            if not config.app.get("enable_g4f", False):
+                raise ValueError(
+                    "g4f provider is disabled by default because it relies on "
+                    "reverse-engineered third-party endpoints. Set enable_g4f=true "
+                    "in config.toml only if you understand and accept the security, "
+                    "reliability, and legal risks."
+                )
+
+            logger.warning(
+                "g4f provider is enabled. This provider may be unstable and carries "
+                "supply-chain and terms-of-service risks. Prefer official providers, "
+                "OpenAI-compatible APIs, LiteLLM, Ollama, or local inference for production."
+            )
+            try:
+                import g4f
+            except ImportError as e:
+                raise ValueError(
+                    "g4f package is not installed by default. Install the optional "
+                    "dependency with `uv sync --extra g4f` only if you understand "
+                    "and accept the provider risks."
+                ) from e
+
+            model_name = config.app.get("g4f_model_name", "")
+            if not model_name:
+                model_name = "gpt-4"
+            content = g4f.ChatCompletion.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            if content and "当日额度已消耗完" in content:
+                raise ValueError(content)
+            if not content:
+                raise Exception(f"[{llm_provider}] returned an empty response")
+            return _normalize_text_response(content, llm_provider)
+
         elif llm_provider == "pollinations":
             try:
                 base_url = config.app.get("pollinations_base_url", "")
@@ -328,7 +364,7 @@ def _generate_response(prompt: str) -> str:
         else:
             raise ValueError(f"{llm_provider}: unsupported llm provider")
 
-        if llm_provider not in ["pollinations", "ollama", "litellm"]:  # Skip validation for providers that don't require API key
+        if llm_provider not in ["pollinations", "ollama", "litellm", "g4f"]:  # Skip validation for providers that don't require API key
             if not api_key:
                 raise ValueError(
                     f"{llm_provider}: api_key is not set, please set it in the config.toml file."
