@@ -101,6 +101,28 @@ def _sync_chatterbox_config_from_session_state():
     )
 
 
+def _sync_chatterbox_local_config_from_session_state():
+    # Same rationale as _sync_chatterbox_config_from_session_state(): the
+    # Chatterbox Local settings widgets render after the Play Voice button,
+    # so read their session_state values directly before that button's logic
+    # runs, to avoid using stale config on the first click after a change.
+    config.chatterbox_local["device"] = st.session_state.get(
+        "chatterbox_local_device_input",
+        config.chatterbox_local.get("device", "auto"),
+    )
+    config.chatterbox_local["use_llm_planning"] = st.session_state.get(
+        "chatterbox_local_use_llm_planning_input",
+        config.chatterbox_local.get("use_llm_planning", True),
+    )
+    config.chatterbox_local["tone_catalog_path"] = (
+        st.session_state.get(
+            "chatterbox_local_tone_catalog_path_input",
+            config.chatterbox_local.get("tone_catalog_path", ""),
+        )
+        or ""
+    ).strip()
+
+
 def _detect_audio_mime(audio_file: str, audio_bytes: bytes) -> str:
     # 有些 OpenAI-compatible TTS 服务，例如 travisvn/chatterbox-tts-api，
     # 即使请求 response_format=mp3，也会返回 WAV 内容。WebUI 试听如果固定
@@ -409,6 +431,7 @@ if not config.app.get("hide_config", False):
                 ("MiMo", "mimo"),
                 ("Pollinations", "pollinations"),
                 ("LiteLLM", "litellm"),
+                ("G4F (gpt4free)", "g4f"),
             ]
             llm_provider_ids = [provider_id for _, provider_id in llm_provider_options]
             llm_provider_labels = {
@@ -544,10 +567,29 @@ if not config.app.get("hide_config", False):
                 if not llm_model_name:
                     llm_model_name = "openai/gpt-4o-mini"
 
+            if llm_provider == "g4f":
+                if not llm_model_name:
+                    llm_model_name = "gpt-4"
+
             tips = get_llm_provider_tips(llm_provider, **provider_tip_context)
             if tips:
                 with llm_helper:
                     st.info(tips)
+
+            if llm_provider == "g4f":
+                st.warning(
+                    tr(
+                        "g4f relies on reverse-engineered third-party endpoints, "
+                        "not an official API. No API key is required, but it may "
+                        "be unstable and carries supply-chain and terms-of-service "
+                        "risks. Only enable it if you understand and accept these "
+                        "risks."
+                    )
+                )
+                config.app["enable_g4f"] = st.checkbox(
+                    tr("Enable g4f (I understand the risks)"),
+                    value=config.app.get("enable_g4f", False),
+                )
 
             st_llm_api_key = st.text_input(
                 tr("API Key"), value=llm_api_key, type="password"
@@ -919,6 +961,7 @@ with middle_panel:
             ("mimo-tts", "Xiaomi MiMo TTS"),
             ("elevenlabs", "ElevenLabs TTS"),
             ("chatterbox", "Chatterbox TTS"),
+            ("chatterbox-local", "Chatterbox TTS (Local)"),
         ]
 
         # 获取保存的TTS服务器，默认为v1
@@ -975,6 +1018,9 @@ with middle_panel:
             # 自托管 Chatterbox 服务的预置音色（来自 [chatterbox] voices 配置）
             _sync_chatterbox_config_from_session_state()
             filtered_voices = voice.get_chatterbox_voices()
+        elif selected_tts_server == "chatterbox-local":
+            # 进程内 Chatterbox 模型：音色由 LLM 按语气自动挑选，profile 固定为 default
+            filtered_voices = voice.get_chatterbox_local_voices()
         else:
             # 获取Azure的声音列表
             all_voices = voice.get_all_azure_voices(filter_locals=None)
@@ -998,6 +1044,9 @@ with middle_panel:
                     parts = v.split(":", 2)
                     return parts[2] if len(parts) >= 3 else v
                 if voice.is_chatterbox_voice(v):
+                    name = v.split(":", 1)[1] if ":" in v else v
+                    return name.replace("-Female", "").replace("-Male", "")
+                if voice.is_chatterbox_local_voice(v):
                     name = v.split(":", 1)[1] if ":" in v else v
                     return name.replace("-Female", "").replace("-Male", "")
                 return (
@@ -1058,6 +1107,8 @@ with middle_panel:
         ):
             if selected_tts_server == "chatterbox":
                 _sync_chatterbox_config_from_session_state()
+            elif selected_tts_server == "chatterbox-local":
+                _sync_chatterbox_local_config_from_session_state()
             play_content = params.video_subject
             if not play_content:
                 play_content = params.video_script
@@ -1254,6 +1305,45 @@ with middle_panel:
             config.chatterbox["voices"] = _parse_chatterbox_voices(chatterbox_voices)
 
             tips = get_tts_provider_tips("chatterbox")
+            if tips:
+                st.info(tips)
+
+        # Chatterbox Local settings section (in-process model)
+        if selected_tts_server == "chatterbox-local" or (
+            voice_name and voice.is_chatterbox_local_voice(voice_name)
+        ):
+            _device_options = ["auto", "mps", "cuda", "cpu"]
+            _saved_device = config.chatterbox_local.get("device", "auto")
+            chatterbox_local_device = st.selectbox(
+                tr("Chatterbox Local Device"),
+                options=_device_options,
+                index=_device_options.index(_saved_device)
+                if _saved_device in _device_options
+                else 0,
+                key="chatterbox_local_device_input",
+            )
+            config.chatterbox_local["device"] = chatterbox_local_device
+
+            chatterbox_local_use_llm_planning = st.checkbox(
+                tr("Chatterbox Local Use LLM Tone Planning"),
+                value=config.chatterbox_local.get("use_llm_planning", True),
+                key="chatterbox_local_use_llm_planning_input",
+            )
+            config.chatterbox_local["use_llm_planning"] = (
+                chatterbox_local_use_llm_planning
+            )
+
+            chatterbox_local_tone_catalog_path = st.text_input(
+                tr("Chatterbox Local Tone Catalog Path"),
+                value=config.chatterbox_local.get("tone_catalog_path", ""),
+                key="chatterbox_local_tone_catalog_path_input",
+                placeholder=tr("Chatterbox Local Tone Catalog Path Placeholder"),
+            )
+            config.chatterbox_local["tone_catalog_path"] = (
+                chatterbox_local_tone_catalog_path or ""
+            ).strip()
+
+            tips = get_tts_provider_tips("chatterbox-local")
             if tips:
                 st.info(tips)
 
