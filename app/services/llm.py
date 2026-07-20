@@ -330,7 +330,20 @@ def _generate_response(prompt: str) -> str:
                     "messages": [
                         {"role": "user", "content": prompt}
                     ],
-                    "seed": 101  # Optional but helps with reproducibility
+                    "seed": 101,  # Optional but helps with reproducibility
+                    # pollinations' default models (e.g. gpt-oss-20b behind
+                    # "openai-fast") are reasoning models that otherwise spend
+                    # their output token budget on an internal "reasoning"
+                    # field before ever writing the actual answer — for long
+                    # prompts (e.g. chatterbox-local's tone-planning prompt)
+                    # this reliably truncates the response (finish_reason
+                    # "length", empty/partial "content") before it's usable.
+                    # Confirmed live: identical prompt goes from
+                    # finish_reason="length" (no content) to finish_reason
+                    # "stop" (full content) with this set. Content generation
+                    # here (scripts, keywords, tone plans) doesn't need heavy
+                    # chain-of-thought, so this is a safe default.
+                    "reasoning_effort": "low",
                 }
 
                 # Optional parameters if configured
@@ -348,11 +361,31 @@ def _generate_response(prompt: str) -> str:
                 response.raise_for_status()
                 result = response.json()
 
-                if result and "choices" in result and len(result["choices"]) > 0:
-                    content = result["choices"][0]["message"]["content"]
-                    return _normalize_text_response(content, llm_provider)
-                else:
-                    raise Exception(f"[{llm_provider}] returned an invalid response format")
+                # pollinations is a free, rate-limited third-party service and
+                # occasionally returns a 200 whose choices/message don't carry
+                # a "content" field (seen in production as a bare `'content'`
+                # KeyError with no other clue). Extract defensively and, on
+                # failure, report the actual response shape so it's
+                # diagnosable instead of an opaque KeyError.
+                choices = result.get("choices") if isinstance(result, dict) else None
+                first_choice = choices[0] if choices else None
+                message = (
+                    first_choice.get("message") if isinstance(first_choice, dict) else None
+                )
+                content = message.get("content") if isinstance(message, dict) else None
+
+                if not content:
+                    finish_reason = (
+                        first_choice.get("finish_reason")
+                        if isinstance(first_choice, dict)
+                        else None
+                    )
+                    message_keys = list(message.keys()) if isinstance(message, dict) else None
+                    raise Exception(
+                        f"[{llm_provider}] response missing message content "
+                        f"(finish_reason={finish_reason!r}, message_keys={message_keys})"
+                    )
+                return _normalize_text_response(content, llm_provider)
 
             except requests.exceptions.RequestException as e:
                 raise Exception(f"[{llm_provider}] request failed: {str(e)}")

@@ -62,10 +62,17 @@ if [ -z "$WEBUI_PORT" ]; then
 fi
 
 echo "***** WebUI address: http://MoneyPrinterTurbo.local:$WEBUI_PORT *****"
+# fileWatcherType=none: Streamlit's default file watcher walks every
+# imported module's __path__ (including torch's, which is unusually
+# expensive to introspect) to detect source changes, and it keeps polling
+# for as long as the server runs, not just at startup. We don't need
+# hot-reload for a LAN deployment, so disabling it removes that recurring
+# overhead entirely instead of just at launch.
 "$PROJECT_DIR/.venv/bin/python" -m streamlit run "$PROJECT_DIR/webui/Main.py" \
   --server.address=0.0.0.0 \
   --server.port="$WEBUI_PORT" \
   --browser.serverAddress=MoneyPrinterTurbo.local \
   --browser.gatherUsageStats=False \
   --server.showEmailPrompt=False \
-  --server.enableCORS=True
+  --server.enableCORS=True \
+  --server.fileWatcherType=none

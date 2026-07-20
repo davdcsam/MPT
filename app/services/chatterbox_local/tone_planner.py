@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 
 import yaml
 from loguru import logger
@@ -21,8 +22,24 @@ from app.services.llm import generate_text_response
 DEFAULT_TONE_CATALOG_PATH = os.path.join(
     os.path.dirname(__file__), "assets", "tone_catalog.yaml"
 )
-# 1 initial attempt + 1 self-repair retry, mirroring llm_guion.py's single retry.
-_MAX_PLANNING_ATTEMPTS = 2
+# 1 initial attempt + 2 self-repair retries. Bumped from 1 retry after seeing
+# two back-to-back attempts fail identically against pollinations in
+# production (a transient provider hiccup, not a prompt problem — a fresh
+# call with the same prompt succeeded right after) — a bit more patience,
+# spaced out below, rides those out instead of giving up immediately.
+_MAX_PLANNING_ATTEMPTS = 3
+# Seconds to wait before each retry (attempt index * this), so we don't
+# hammer a provider that's already struggling.
+_RETRY_BACKOFF_SECONDS = 1.5
+
+# ChatterboxTTS.generate() hard-caps every single call to 1000 speech tokens
+# at ~25 tokens/sec (chatterbox/models/s3tokenizer/s3tokenizer.py), i.e.
+# ~40s of audio — any text needing longer than that gets silently truncated
+# by the model itself, not raised as an error. Cap segment text well under
+# that ceiling (comfortable margin for slower/more exaggerated deliveries)
+# regardless of whether it came from the LLM planner or the fallback path,
+# so no segment can ever hit that limit.
+_MAX_SEGMENT_CHARS = 320
 
 _REQUIRED_STRING_FIELDS = ("tone", "text", "reference")
 _REQUIRED_NUMERIC_FIELDS = ("pre_pause_sec", "post_pause_sec")
@@ -210,22 +227,105 @@ def _parse_and_validate(raw_response: str, catalog: dict) -> list[dict]:
     return sorted(data["script"], key=lambda s: s.get("segment", 0))
 
 
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _split_text_into_chunks(text: str, max_chars: int) -> list[str]:
+    """Greedily pack sentences into chunks no longer than max_chars.
+
+    Falls back to splitting on whitespace for any single sentence that alone
+    exceeds max_chars, so no returned chunk can ever exceed the budget.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+
+    sentences = [s for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+    chunks: list[str] = []
+    current = ""
+
+    def flush():
+        nonlocal current
+        if current.strip():
+            chunks.append(current.strip())
+        current = ""
+
+    for sentence in sentences:
+        if len(sentence) > max_chars:
+            flush()
+            piece = ""
+            for word in sentence.split():
+                candidate = f"{piece} {word}".strip()
+                if len(candidate) > max_chars and piece:
+                    chunks.append(piece.strip())
+                    piece = word
+                else:
+                    piece = candidate
+            if piece.strip():
+                chunks.append(piece.strip())
+            continue
+
+        candidate = f"{current} {sentence}".strip()
+        if len(candidate) > max_chars and current:
+            flush()
+            current = sentence
+        else:
+            current = candidate
+
+    flush()
+    return chunks
+
+
+def _enforce_segment_length_limit(
+    segments: list[dict], max_chars: int = _MAX_SEGMENT_CHARS
+) -> list[dict]:
+    """Split any segment whose text risks Chatterbox's ~40s per-call ceiling
+    into multiple same-tone/same-params segments, so a single `generate()`
+    call is never asked to speak more than it safely can — independent of
+    whether `segments` came from the LLM planner or the emergency fallback.
+    """
+    result: list[dict] = []
+    for seg in segments:
+        pieces = _split_text_into_chunks(seg.get("text", ""), max_chars)
+        if len(pieces) <= 1:
+            result.append(seg)
+            continue
+
+        logger.info(
+            f"chatterbox-local: segment text ({len(seg['text'])} chars) exceeds the "
+            f"safe {max_chars}-char budget, splitting into {len(pieces)} sub-segments"
+        )
+        for i, piece in enumerate(pieces):
+            chunk = dict(seg)
+            chunk["text"] = piece
+            chunk["pre_pause_sec"] = seg.get("pre_pause_sec", 0.0) if i == 0 else 0.05
+            chunk["post_pause_sec"] = (
+                seg.get("post_pause_sec", 0.0) if i == len(pieces) - 1 else 0.1
+            )
+            result.append(chunk)
+
+    for i, seg in enumerate(result, start=1):
+        seg["segment"] = i
+    return result
+
+
 def _fallback_single_segment(text: str, catalog: dict) -> list[dict]:
     default_tone = catalog["default_tone"]
     base_params = catalog["tones"][default_tone].get("base_params", {})
-    return [
-        {
-            "segment": 1,
-            "tone": default_tone,
-            "text": text.strip(),
-            "reference": catalog["tones"][default_tone]["reference_wav"],
-            "exaggeration": base_params.get("exaggeration"),
-            "cfg_weight": base_params.get("cfg_weight"),
-            "temperature": base_params.get("temperature"),
-            "pre_pause_sec": 0.0,
-            "post_pause_sec": 0.0,
-        }
-    ]
+    base_segment = {
+        "segment": 1,
+        "tone": default_tone,
+        "text": text.strip(),
+        "reference": catalog["tones"][default_tone]["reference_wav"],
+        "exaggeration": base_params.get("exaggeration"),
+        "cfg_weight": base_params.get("cfg_weight"),
+        "temperature": base_params.get("temperature"),
+        "pre_pause_sec": 0.0,
+        "post_pause_sec": 0.0,
+    }
+    return _enforce_segment_length_limit([base_segment])
 
 
 def plan_script_segments(
@@ -254,7 +354,8 @@ def plan_script_segments(
             raw_response = generate_text_response(prompt)
             if isinstance(raw_response, str) and raw_response.startswith("Error: "):
                 raise ValueError(raw_response)
-            return _parse_and_validate(raw_response, catalog)
+            segments = _parse_and_validate(raw_response, catalog)
+            return _enforce_segment_length_limit(segments)
         except Exception as e:
             last_error = str(e)
             logger.warning(
@@ -262,11 +363,18 @@ def plan_script_segments(
                 f"failed: {last_error}"
             )
             if attempt < _MAX_PLANNING_ATTEMPTS:
-                prompt = (
-                    f"{prompt}\n\nYour previous response was not valid JSON or failed "
-                    f"validation: {last_error}\n\nPrevious response:\n{raw_response}\n\n"
-                    "Respond only with the corrected JSON, no explanations, no markdown."
-                )
+                # Only feed the "fix your JSON" framing back when there was
+                # an actual malformed/invalid response to repair. For a
+                # provider-side hiccup (network/timeout/missing content, no
+                # raw_response to show) that framing is misleading — just
+                # retry the original prompt after a short backoff instead.
+                if raw_response:
+                    prompt = (
+                        f"{prompt}\n\nYour previous response was not valid JSON or failed "
+                        f"validation: {last_error}\n\nPrevious response:\n{raw_response}\n\n"
+                        "Respond only with the corrected JSON, no explanations, no markdown."
+                    )
+                time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
 
     logger.warning(
         "chatterbox-local tone planning failed after all attempts "

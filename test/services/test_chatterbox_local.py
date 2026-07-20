@@ -73,7 +73,7 @@ class TestPlanScriptSegments(unittest.TestCase):
         with patch(
             "app.services.chatterbox_local.tone_planner.generate_text_response",
             side_effect=["not json at all", _VALID_LLM_JSON],
-        ) as mocked:
+        ) as mocked, patch("app.services.chatterbox_local.tone_planner.time.sleep"):
             segments = tone_planner.plan_script_segments(
                 "Hello there.", catalog, use_llm_planning=True
             )
@@ -85,12 +85,12 @@ class TestPlanScriptSegments(unittest.TestCase):
         catalog = tone_planner.load_tone_catalog()
         with patch(
             "app.services.chatterbox_local.tone_planner.generate_text_response",
-            side_effect=["garbage", "still garbage"],
-        ) as mocked:
+            side_effect=["garbage", "still garbage", "still garbage again"],
+        ) as mocked, patch("app.services.chatterbox_local.tone_planner.time.sleep"):
             segments = tone_planner.plan_script_segments(
                 "Hello there.", catalog, use_llm_planning=True
             )
-        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(mocked.call_count, 3)
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0]["tone"], catalog["default_tone"])
         self.assertEqual(segments[0]["text"], "Hello there.")
@@ -108,6 +108,52 @@ class TestPlanScriptSegments(unittest.TestCase):
         mocked.assert_not_called()
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0]["tone"], catalog["default_tone"])
+
+    def test_plan_script_segments_use_llm_planning_false_splits_long_text(self):
+        """A script long enough to exceed Chatterbox's ~40s/generate() ceiling
+        must never come back as a single segment, even in the no-LLM fallback
+        path — each generate() call is capped by the model itself, not by us."""
+        catalog = tone_planner.load_tone_catalog()
+        long_text = " ".join(f"This is sentence number {i}." for i in range(40))
+        self.assertGreater(len(long_text), tone_planner._MAX_SEGMENT_CHARS)
+
+        segments = tone_planner.plan_script_segments(
+            long_text, catalog, use_llm_planning=False
+        )
+
+        self.assertGreater(len(segments), 1)
+        for seg in segments:
+            self.assertLessEqual(len(seg["text"]), tone_planner._MAX_SEGMENT_CHARS)
+            self.assertEqual(seg["tone"], catalog["default_tone"])
+        # every word from the source text must survive the split, in order
+        self.assertEqual(
+            " ".join(seg["text"] for seg in segments).split(), long_text.split()
+        )
+
+
+class TestSplitTextIntoChunks(unittest.TestCase):
+    def test_split_text_into_chunks_keeps_short_text_whole(self):
+        self.assertEqual(
+            tone_planner._split_text_into_chunks("Hello there.", max_chars=320),
+            ["Hello there."],
+        )
+
+    def test_split_text_into_chunks_splits_on_sentence_boundaries(self):
+        text = "Short one. " + ("Padding word. " * 20) + "Final sentence here."
+        chunks = tone_planner._split_text_into_chunks(text, max_chars=60)
+
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), 60)
+        self.assertEqual(" ".join(chunks).split(), text.split())
+
+    def test_split_text_into_chunks_force_splits_a_single_overlong_sentence(self):
+        text = "word " * 100  # one giant "sentence" with no punctuation at all
+        chunks = tone_planner._split_text_into_chunks(text.strip(), max_chars=30)
+
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), 30)
 
 
 class TestResolveGenerationParams(unittest.TestCase):

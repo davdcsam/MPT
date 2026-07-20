@@ -255,6 +255,63 @@ def open_task_folder(task_id):
         logger.error(e)
 
 
+def _generate_completion_beep_base64() -> str:
+    # 用正弦波在内存里合成一小段提示音，不需要额外往仓库里加二进制资源文件。
+    # 两声短促的 "叮-叮" 比单声更容易在用户切到别的标签页时被注意到。
+    import base64
+    import io
+    import math
+    import struct
+    import wave
+
+    sample_rate = 44100
+    volume = 0.35
+
+    def tone_samples(frequency: float, duration: float):
+        n_samples = int(sample_rate * duration)
+        for i in range(n_samples):
+            t = i / sample_rate
+            yield volume * math.sin(2 * math.pi * frequency * t)
+
+    def silence_samples(duration: float):
+        for _ in range(int(sample_rate * duration)):
+            yield 0.0
+
+    frames = bytearray()
+    for sample in (
+        list(tone_samples(880.0, 0.15))
+        + list(silence_samples(0.1))
+        + list(tone_samples(880.0, 0.15))
+    ):
+        frames += struct.pack("<h", int(sample * 32767))
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(bytes(frames))
+
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+_COMPLETION_BEEP_BASE64 = _generate_completion_beep_base64()
+
+
+def play_completion_alarm():
+    # 依赖用户已经点击过"生成视频"按钮触发的这次脚本重跑，满足浏览器
+    # autoplay 需要的用户交互前提，避免被静音拦截。
+    st.components.v1.html(
+        f"""
+        <audio autoplay style="display:none">
+            <source src="data:audio/wav;base64,{_COMPLETION_BEEP_BASE64}" type="audio/wav">
+        </audio>
+        """,
+        height=0,
+        width=0,
+    )
+
+
 def scroll_to_bottom():
     js = """
     <script>
@@ -1725,6 +1782,7 @@ if start_button:
 
     video_files = result.get("videos", [])
     st.success(tr("Video Generation Completed"))
+    play_completion_alarm()
     try:
         if video_files:
             player_cols = st.columns(len(video_files) * 2 + 1)

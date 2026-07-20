@@ -486,20 +486,22 @@ class TestVideoService(unittest.TestCase):
                         vd, "_write_videofile_with_codec_fallback"
                     ) as write_mock:
                         with patch.object(vd, "concat_video_clips_with_ffmpeg") as concat_mock:
-                            with patch.object(vd, "delete_files"):
-                                result = vd.combine_videos(
-                                    combined_video_path=combined_video_path,
-                                    video_paths=list(video_durations.keys()),
-                                    audio_file=os.path.join(temp_dir, "audio.mp3"),
-                                    video_aspect=vd.VideoAspect.portrait,
-                                    video_concat_mode=vd.VideoConcatMode.sequential,
-                                    video_transition_mode=None,
-                                    max_clip_duration=10,
-                                )
+                            with patch.object(vd, "_mux_audio_into_video") as mux_mock:
+                                with patch.object(vd, "delete_files"):
+                                    result = vd.combine_videos(
+                                        combined_video_path=combined_video_path,
+                                        video_paths=list(video_durations.keys()),
+                                        audio_file=os.path.join(temp_dir, "audio.mp3"),
+                                        video_aspect=vd.VideoAspect.portrait,
+                                        video_concat_mode=vd.VideoConcatMode.sequential,
+                                        video_transition_mode=None,
+                                        max_clip_duration=10,
+                                    )
 
         self.assertEqual(result, combined_video_path)
         self.assertEqual(write_mock.call_count, 4)
         self.assertEqual(concat_mock.call_args.kwargs["max_duration"], 10.0)
+        self.assertEqual(mux_mock.call_args.kwargs["output_file"], combined_video_path)
 
     def test_concat_video_clips_limits_output_to_audio_duration(self):
         """最终拼接时应裁到音频时长，避免安全余量带来明显静音尾巴。"""

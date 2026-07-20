@@ -376,6 +376,46 @@ def concat_video_clips_with_ffmpeg(
         delete_files(concat_list_file)
 
 
+def _mux_audio_into_video(video_path: str, audio_path: str, output_file: str) -> None:
+    # concat_video_clips_with_ffmpeg 只拼接画面，产出的 combined-#.mp4 本身没有
+    # 音轨。这里用 ffmpeg 把旁白音频复用进去（不重新编码视频），这样存储里的
+    # combined-#.mp4 也能直接听到声音，而不用等到带字幕的 final-#.mp4。
+    #
+    # 旁白源文件（例如 Chatterbox Local TTS）常见是 24kHz 单声道。如果原样
+    # 封装，QuickTime / Finder 预览在 macOS 上会把视频播放出来但没有声音，
+    # 尽管 ffprobe/VLC 完全能正常解码。这里显式重采样到 44.1kHz 立体声，
+    # 和 generate_video() 里 MoviePy 输出 final-#.mp4 时的音频规格保持一致，
+    # 从而避免这种“看起来正常但静音”的兼容性问题。
+    command = [
+        utils.get_ffmpeg_binary(),
+        "-y",
+        "-i",
+        video_path,
+        "-i",
+        audio_path,
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        audio_codec,
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-b:a",
+        audio_bitrate,
+        "-shortest",
+        output_file,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        error_message = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(error_message or "ffmpeg audio mux failed")
+
+
 def _sanitize_image_file(image_path: str) -> str:
     # 某些本地图片虽然能被 Pillow 打开，但会因为损坏的 EXIF/eXIf 元数据导致
     # ImageClip 在解析阶段直接抛异常。这里重新导出一份“干净图片”，把坏元数据剥离掉。
@@ -728,17 +768,26 @@ def combine_videos(
     
     clip_files = [clip.file_path for clip in processed_clips]
     logger.info(f"concatenating {len(clip_files)} clips with ffmpeg")
+    silent_video_path = os.path.join(output_dir, "temp-combined-silent.mp4")
     concat_video_clips_with_ffmpeg(
         clip_files=clip_files,
-        output_file=combined_video_path,
+        output_file=silent_video_path,
         threads=threads,
         output_dir=output_dir,
         max_duration=audio_duration,
     )
-    
+
+    logger.info("muxing narration audio into combined video")
+    _mux_audio_into_video(
+        video_path=silent_video_path,
+        audio_path=audio_file,
+        output_file=combined_video_path,
+    )
+
     # clean temp files
     delete_files(clip_files)
-            
+    delete_files(silent_video_path)
+
     logger.info("video combining completed")
     return combined_video_path
 

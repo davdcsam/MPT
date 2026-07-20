@@ -109,6 +109,29 @@ def _save_segment_wav(wav, sample_rate: int, path: str) -> None:
     torchaudio.save(path, wav, sample_rate)
 
 
+def _release_generation_memory() -> None:
+    """Free the working memory a synthesis run leaves behind.
+
+    The model itself stays cached (see get_chatterbox_model), but PyTorch's
+    MPS/CUDA caching allocator holds onto the tensors it allocated during
+    generation and never returns them to the OS on its own — across repeated
+    syntheses in the long-lived API/WebUI process that grows unbounded.
+    """
+    import gc
+
+    gc.collect()
+
+    try:
+        import torch
+    except ImportError:
+        return
+
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    elif torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def synthesize_segments(
     segments: list[dict],
     catalog: dict,
@@ -134,27 +157,38 @@ def synthesize_segments(
     combined = AudioSegment.empty()
     rendered: list[tuple[str, float, float, float]] = []
 
-    with tempfile.TemporaryDirectory(prefix="chatterbox_local_") as tmp_dir:
-        for i, seg in enumerate(segments):
-            reference_wav = resolve_reference_wav(seg["tone"], catalog, tone_dir)
-            params = resolve_generation_params(seg, catalog)
+    try:
+        with tempfile.TemporaryDirectory(prefix="chatterbox_local_") as tmp_dir:
+            for i, seg in enumerate(segments):
+                reference_wav = resolve_reference_wav(seg["tone"], catalog, tone_dir)
+                params = resolve_generation_params(seg, catalog)
 
-            wav = _run_model_generate(model, seg["text"], reference_wav, params)
-            seg_path = os.path.join(tmp_dir, f"seg_{i:03d}.wav")
-            _save_segment_wav(wav, sample_rate, seg_path)
+                wav = _run_model_generate(model, seg["text"], reference_wav, params)
+                seg_path = os.path.join(tmp_dir, f"seg_{i:03d}.wav")
+                _save_segment_wav(wav, sample_rate, seg_path)
+                del wav
+                # Release per-segment as we go, not just once at the end: for
+                # scripts with many segments, PyTorch's MPS/CUDA allocator
+                # otherwise keeps accumulating each segment's tensors on top
+                # of the previous ones for the whole loop, which is what let
+                # the process footprint balloon (and risk an OS-level
+                # low-memory kill) mid-synthesis rather than after it.
+                _release_generation_memory()
 
-            audio = AudioSegment.from_wav(seg_path)
-            pre_pause = float(seg.get("pre_pause_sec", 0.0) or 0.0)
-            post_pause = float(seg.get("post_pause_sec", 0.0) or 0.0)
+                audio = AudioSegment.from_wav(seg_path)
+                pre_pause = float(seg.get("pre_pause_sec", 0.0) or 0.0)
+                post_pause = float(seg.get("post_pause_sec", 0.0) or 0.0)
 
-            if pre_pause > 0:
-                combined += AudioSegment.silent(duration=int(pre_pause * 1000))
-            combined += audio
-            if post_pause > 0:
-                combined += AudioSegment.silent(duration=int(post_pause * 1000))
+                if pre_pause > 0:
+                    combined += AudioSegment.silent(duration=int(pre_pause * 1000))
+                combined += audio
+                if post_pause > 0:
+                    combined += AudioSegment.silent(duration=int(post_pause * 1000))
 
-            rendered.append((seg["text"], audio.duration_seconds, pre_pause, post_pause))
+                rendered.append((seg["text"], audio.duration_seconds, pre_pause, post_pause))
 
-        combined.export(output_path, format="mp3")
+            combined.export(output_path, format="mp3")
+    finally:
+        _release_generation_memory()
 
     return rendered
