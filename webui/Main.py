@@ -482,6 +482,7 @@ if not config.app.get("hide_config", False):
                 ("Groq", "groq"),
                 ("Ollama", "ollama"),
                 ("OneAPI", "oneapi"),
+                ("NVIDIA NIM", "nvidia"),
                 ("Cloudflare", "cloudflare"),
                 ("ERNIE", "ernie"),
                 ("MiniMax", "minimax"),
@@ -615,6 +616,12 @@ if not config.app.get("hide_config", False):
                     llm_model_name = "Qwen/Qwen3-32B"
                 if not llm_base_url:
                     llm_base_url = "https://api-inference.modelscope.cn/v1/"
+
+            if llm_provider == "nvidia":
+                if not llm_model_name:
+                    llm_model_name = "meta/llama-3.1-70b-instruct"
+                if not llm_base_url:
+                    llm_base_url = "https://integrate.api.nvidia.com/v1"
 
             if llm_provider == "pollinations":
                 if not llm_model_name:

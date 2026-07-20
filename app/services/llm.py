@@ -182,6 +182,16 @@ def _generate_response(prompt: str) -> str:
             api_key = config.app.get("oneapi_api_key")
             model_name = config.app.get("oneapi_model_name")
             base_url = config.app.get("oneapi_base_url", "")
+        elif llm_provider == "nvidia":
+            api_key = config.app.get("nvidia_api_key")
+            model_name = config.app.get("nvidia_model_name")
+            base_url = config.app.get("nvidia_base_url", "")
+            # NVIDIA NIM (build.nvidia.com) exposes an OpenAI-compatible
+            # chat completions API for its hosted models.
+            if not base_url:
+                base_url = "https://integrate.api.nvidia.com/v1"
+            if not model_name:
+                model_name = "meta/llama-3.1-70b-instruct"
         elif llm_provider == "azure":
             api_key = config.app.get("azure_api_key")
             model_name = config.app.get("azure_model_name")
