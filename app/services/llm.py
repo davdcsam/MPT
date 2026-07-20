@@ -766,10 +766,21 @@ def generate_script(
     for i in range(_max_retries):
         try:
             response = _generate_response(prompt=prompt)
+            if response and "Error: " in response:
+                # Transient provider failures (e.g. a free/rate-limited
+                # service like pollinations returning a 500) must not be
+                # treated as a final result - keep the message around in
+                # case every retry fails, but let the loop try again.
+                logger.warning(
+                    f"failed to generate video script (attempt {i + 1}/{_max_retries}): {response}"
+                )
+                final_script = response
+                continue
             if response:
                 final_script = format_response(response)
             else:
                 logging.error("gpt returned an empty response")
+                continue
 
             # Some upstream providers may return quota errors as plain text.
             if final_script and "当日额度已消耗完" in final_script:
@@ -879,7 +890,15 @@ Please note that you must use English for generating video search terms; Chinese
         try:
             response = _generate_response(prompt)
             if "Error: " in response:
-                logger.error(f"failed to generate video script: {response}")
+                # Transient provider failures (e.g. a free/rate-limited
+                # service like pollinations returning a 500) must not abort
+                # the retry loop immediately - keep the message around in
+                # case every retry fails, but let the loop try again.
+                logger.warning(
+                    f"failed to generate video terms (attempt {i + 1}/{_max_retries}): {response}"
+                )
+                if i < _max_retries - 1:
+                    continue
                 return response
             search_terms = json.loads(_strip_code_fence(response))
             if not isinstance(search_terms, list) or not all(
