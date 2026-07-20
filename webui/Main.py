@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import webbrowser
@@ -143,6 +144,72 @@ def _detect_audio_mime(audio_file: str, audio_bytes: bytes) -> str:
         ".flac": "audio/flac",
     }.get(ext, "audio/mp3")
 
+
+# Streamlit's session_state only survives while the process/session is alive -
+# restarting the app or opening a fresh browser session loses any typed input
+# that isn't separately mirrored into config.toml (e.g. video subject/script/
+# keywords, custom prompts). This persists a JSON-serializable snapshot of
+# session_state to disk on every run so widget state survives a full app
+# restart ("cold" state), not just page reruns within the same session.
+SESSION_STATE_FILE = os.path.join(root_dir, "storage", "webui_session_state.json")
+
+# Button-like widgets (st.button, st.download_button, st.form_submit_button)
+# raise if their Session State value is set programmatically, so a stale
+# "clicked" value must never be restored.
+_SESSION_STATE_RESTORE_EXCLUDE = {"auto_generate_script", "auto_generate_terms"}
+
+# Never persist secrets (API keys/tokens) or the ElevenLabs voice cache, whose
+# key name embeds the API key value itself - config.toml already owns secret
+# persistence, and duplicating them into a second on-disk file is unnecessary
+# exposure.
+_SESSION_STATE_SENSITIVE_KEY_MARKERS = ("api_key", "secret", "password", "token")
+
+
+def _is_sensitive_session_state_key(key: str) -> bool:
+    lowered = key.lower()
+    if lowered.startswith("elevenlabs_voices_"):
+        return True
+    return any(marker in lowered for marker in _SESSION_STATE_SENSITIVE_KEY_MARKERS)
+
+
+def _load_persisted_session_state() -> dict:
+    if not os.path.isfile(SESSION_STATE_FILE):
+        return {}
+    try:
+        with open(SESSION_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"failed to load persisted webui session state: {e}")
+        return {}
+
+
+def _restore_persisted_session_state() -> None:
+    for key, value in _load_persisted_session_state().items():
+        if key in _SESSION_STATE_RESTORE_EXCLUDE:
+            continue
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def _save_persisted_session_state() -> None:
+    persisted = {}
+    for key, value in st.session_state.items():
+        if key in _SESSION_STATE_RESTORE_EXCLUDE or _is_sensitive_session_state_key(key):
+            continue
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            continue
+        persisted[key] = value
+    try:
+        os.makedirs(os.path.dirname(SESSION_STATE_FILE), exist_ok=True)
+        with open(SESSION_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(persisted, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"failed to persist webui session state: {e}")
+
+
+_restore_persisted_session_state()
 
 if "video_subject" not in st.session_state:
     st.session_state["video_subject"] = ""
@@ -1803,3 +1870,4 @@ if start_button:
     scroll_to_bottom()
 
 config.save_config()
+_save_persisted_session_state()
