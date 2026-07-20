@@ -153,10 +153,16 @@ def _detect_audio_mime(audio_file: str, audio_bytes: bytes) -> str:
 # restart ("cold" state), not just page reruns within the same session.
 SESSION_STATE_FILE = os.path.join(root_dir, "storage", "webui_session_state.json")
 
-# Button-like widgets (st.button, st.download_button, st.form_submit_button)
-# raise if their Session State value is set programmatically, so a stale
-# "clicked" value must never be restored.
-_SESSION_STATE_RESTORE_EXCLUDE = {"auto_generate_script", "auto_generate_terms"}
+# Button-like and upload-like widgets (st.button, st.download_button,
+# st.form_submit_button, st.file_uploader, st.camera_input, st.chat_input)
+# raise StreamlitValueAssignmentNotAllowedError if their Session State value
+# is set programmatically, so a stale "clicked"/"uploaded" value must never
+# be restored.
+_SESSION_STATE_RESTORE_EXCLUDE = {
+    "auto_generate_script",
+    "auto_generate_terms",
+    "custom_audio_file_uploader",
+}
 
 # Never persist secrets (API keys/tokens) or the ElevenLabs voice cache, whose
 # key name embeds the API key value itself - config.toml already owns secret
