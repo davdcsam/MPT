@@ -449,6 +449,48 @@ class TestLiteLLMProvider(unittest.TestCase):
         )
         self.assertEqual(result, "helloaimlapi")
 
+    def test_nvidia_provider_uses_openai_compatible_client(self):
+        """
+        NVIDIA NIM (build.nvidia.com) is OpenAI-compatible. Verify the provider
+        falls back to its own default endpoint and model instead of requiring
+        the generic OpenAI settings.
+        """
+        config.app["llm_provider"] = "nvidia"
+        config.app["nvidia_api_key"] = "nvidia-key"
+        config.app["nvidia_base_url"] = ""
+        config.app["nvidia_model_name"] = ""
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                message = types.SimpleNamespace(content="hello\nnvidia")
+                choice = types.SimpleNamespace(message=message)
+                return types.SimpleNamespace(choices=[choice])
+
+        fake_completions = FakeCompletions()
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=fake_completions)
+        )
+
+        with (
+            patch.object(llm, "OpenAI", return_value=fake_client) as openai_client,
+            patch.object(llm, "ChatCompletion", types.SimpleNamespace),
+        ):
+            result = llm._generate_response("Say hello")
+
+        openai_client.assert_called_once_with(
+            api_key="nvidia-key",
+            base_url="https://integrate.api.nvidia.com/v1",
+        )
+        self.assertEqual(
+            fake_completions.kwargs,
+            {
+                "model": "meta/llama-3.1-70b-instruct",
+                "messages": [{"role": "user", "content": "Say hello"}],
+            },
+        )
+        self.assertEqual(result, "hellonvidia")
+
     def test_evolink_provider_uses_openai_compatible_client(self):
         """
         EvoLink exposes OpenAI-compatible Chat Completions at direct.evolink.ai.

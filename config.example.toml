@@ -84,6 +84,7 @@ twelvelabs_rerank_terms = false
 #   gemini
 #   ollama
 #   oneapi
+#   nvidia      (NVIDIA NIM / build.nvidia.com, OpenAI-compatible)
 #   cloudflare
 #   minimax
 #   evolink    (OpenAI-compatible multi-model AI gateway)
@@ -163,6 +164,15 @@ moonshot_model_name = "kimi-k2.7-code"
 oneapi_api_key = ""
 oneapi_base_url = ""
 oneapi_model_name = ""
+
+########## NVIDIA NIM API Key
+# NVIDIA NIM (build.nvidia.com) is OpenAI-compatible and hosts many free/open
+# models (Llama, Nemotron, etc). Visit https://build.nvidia.com to sign in and
+# generate an API key (starts with "nvapi-"), e.g. for
+# https://build.nvidia.com/meta/llama-3_1-70b-instruct.
+nvidia_api_key = ""
+nvidia_base_url = "https://integrate.api.nvidia.com/v1"
+nvidia_model_name = "meta/llama-3.1-70b-instruct"
 
 ########## Azure API Key
 # Visit https://learn.microsoft.com/zh-cn/azure/ai-services/openai/ to get more details
