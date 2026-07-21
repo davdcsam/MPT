@@ -227,6 +227,58 @@ class TestSynthesizeSegments(unittest.TestCase):
         self.assertEqual((rendered[0][2], rendered[0][3]), (0.0, 0.2))
         self.assertEqual((rendered[1][2], rendered[1][3]), (0.1, 0.0))
 
+    def test_synthesize_segments_falls_back_to_cpu_on_oom(self):
+        """A device OOM (e.g. MPS unified memory exhausted) on one segment
+        should drop the whole remaining run to CPU instead of aborting."""
+        catalog = tone_planner.load_tone_catalog()
+        tone_dir = catalog["_catalog_dir"]
+
+        segments = [
+            {"tone": "EXPLICACION", "text": "Hello", "pre_pause_sec": 0.0, "post_pause_sec": 0.0},
+            {"tone": "TRIUNFO", "text": "World", "pre_pause_sec": 0.0, "post_pause_sec": 0.0},
+        ]
+
+        class _FakeSubmodule:
+            def to(self, device):
+                return self
+
+        class _FakeModel:
+            sr = 24000
+            device = "mps"
+            conds = None
+            ve = _FakeSubmodule()
+            t3 = _FakeSubmodule()
+            s3gen = _FakeSubmodule()
+
+        def _fake_save(wav, sample_rate, path):
+            _write_silent_wav(path, duration_seconds=0.5, sample_rate=sample_rate)
+
+        fake_model = _FakeModel()
+        oom_error = RuntimeError("MPS backend out of memory (MPS allocated: 4.09 GB)")
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            engine, "get_chatterbox_model", return_value=fake_model
+        ), patch.object(
+            engine, "_run_model_generate", side_effect=[oom_error, "fake-wav-tensor", "fake-wav-tensor"]
+        ) as run_generate, patch.object(
+            engine, "_save_segment_wav", side_effect=_fake_save
+        ):
+            output_path = str(Path(tmp_dir) / "output.mp3")
+            rendered = engine.synthesize_segments(
+                segments,
+                catalog=catalog,
+                tone_dir=tone_dir,
+                device_preference="mps",
+                output_path=output_path,
+            )
+
+            # first segment: initial OOM attempt + successful cpu retry = 2 calls
+            self.assertEqual(run_generate.call_count, 3)
+            self.assertTrue(os.path.exists(output_path))
+
+        self.assertEqual(fake_model.device, "cpu")
+        self.assertEqual(len(rendered), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

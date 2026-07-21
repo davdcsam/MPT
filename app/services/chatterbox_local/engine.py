@@ -103,6 +103,23 @@ def _run_model_generate(model, text: str, reference_wav: str, params: dict):
     return model.generate(text, audio_prompt_path=reference_wav, **params)
 
 
+def _is_out_of_memory_error(exc: Exception) -> bool:
+    """MPS/CUDA both surface OOM as a plain RuntimeError; matched by message."""
+    return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+
+def _move_model_to_cpu(model) -> None:
+    """ChatterboxTTS isn't an nn.Module, so it has no `.to()` of its own —
+    move each submodule (mirroring ChatterboxTTS.from_local) and its cached
+    conditionals, then update the device it stamps onto new tensors."""
+    model.ve.to("cpu")
+    model.t3.to("cpu")
+    model.s3gen.to("cpu")
+    if model.conds is not None:
+        model.conds = model.conds.to(device="cpu")
+    model.device = "cpu"
+
+
 def _save_segment_wav(wav, sample_rate: int, path: str) -> None:
     import torchaudio
 
@@ -163,7 +180,24 @@ def synthesize_segments(
                 reference_wav = resolve_reference_wav(seg["tone"], catalog, tone_dir)
                 params = resolve_generation_params(seg, catalog)
 
-                wav = _run_model_generate(model, seg["text"], reference_wav, params)
+                try:
+                    wav = _run_model_generate(model, seg["text"], reference_wav, params)
+                except Exception as e:
+                    if not _is_out_of_memory_error(e):
+                        raise
+                    # MPS/CUDA allocator has nowhere left to go (often other
+                    # apps holding the rest of unified/GPU memory, not just
+                    # this process). Retrying on the same device just fails
+                    # again, so drop the *whole remaining run* to CPU rather
+                    # than aborting a script that was otherwise fine.
+                    logger.warning(
+                        f"chatterbox-local: segment {i} hit an out-of-memory error on "
+                        f"'{model.device}', falling back to cpu for the rest of the run: {e}"
+                    )
+                    _release_generation_memory()
+                    _move_model_to_cpu(model)
+                    wav = _run_model_generate(model, seg["text"], reference_wav, params)
+
                 seg_path = os.path.join(tmp_dir, f"seg_{i:03d}.wav")
                 _save_segment_wav(wav, sample_rate, seg_path)
                 del wav
