@@ -78,6 +78,8 @@ class VideoParams(BaseModel):
     video_transition_mode: Optional[VideoTransitionMode] = None
     video_clip_duration: Optional[int] = 5
     match_materials_to_script: bool = False
+    documentary_sync_mode: Optional[bool] = False
+    documentary_min_segment_seconds: Optional[float] = 4.5
     video_count: Optional[int] = 1
 
     video_source: Optional[str] = "pexels"
