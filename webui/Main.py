@@ -235,6 +235,14 @@ if "match_materials_to_script" not in st.session_state:
     st.session_state["match_materials_to_script"] = bool(
         config.app.get("match_materials_to_script", False)
     )
+if "documentary_sync_mode" not in st.session_state:
+    st.session_state["documentary_sync_mode"] = bool(
+        config.app.get("documentary_sync_mode", False)
+    )
+if "documentary_min_segment_seconds" not in st.session_state:
+    st.session_state["documentary_min_segment_seconds"] = float(
+        config.app.get("documentary_min_segment_seconds", 4.5)
+    )
 if "ui_language" not in st.session_state:
     st.session_state["ui_language"] = config.ui.get("language", system_locale)
 if "is_generating" not in st.session_state:
@@ -879,6 +887,12 @@ params = VideoParams(video_subject="")
 params.match_materials_to_script = bool(
     st.session_state.get("match_materials_to_script", False)
 )
+params.documentary_sync_mode = bool(
+    st.session_state.get("documentary_sync_mode", False)
+)
+params.documentary_min_segment_seconds = float(
+    st.session_state.get("documentary_min_segment_seconds", 4.5)
+)
 uploaded_files = []
 uploaded_audio_file = None
 
@@ -1104,6 +1118,26 @@ with middle_panel:
                 key="match_materials_to_script",
             )
             config.app["match_materials_to_script"] = params.match_materials_to_script
+
+            params.documentary_sync_mode = st.checkbox(
+                tr("Documentary Sync Mode"),
+                help=tr("Documentary Sync Mode Help"),
+                key="documentary_sync_mode",
+            )
+            config.app["documentary_sync_mode"] = params.documentary_sync_mode
+
+            if params.documentary_sync_mode:
+                params.documentary_min_segment_seconds = st.slider(
+                    tr("Minimum Segment Duration (seconds)"),
+                    min_value=3.0,
+                    max_value=8.0,
+                    step=0.5,
+                    help=tr("Minimum Segment Duration Help"),
+                    key="documentary_min_segment_seconds",
+                )
+                config.app["documentary_min_segment_seconds"] = (
+                    params.documentary_min_segment_seconds
+                )
 
             video_codec_options = [
                 ("libx264 (CPU)", "libx264"),
