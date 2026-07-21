@@ -72,7 +72,7 @@ get_video_count() {
 }
 
 process_stream() {
-  local current_task="" clean_line task_id n idx d t pct line_ts
+  local current_task="" clean_line task_id n idx d t pct line_ts is_doc
 
   while IFS= read -r line; do
     clean_line=$(printf '%s' "$line" | sed -E 's/\x1b\[[0-9;]*m//g')
@@ -92,6 +92,7 @@ process_stream() {
         : > "$TASKS_DIR/$current_task/progress.log"
         eval "total_${current_task//-/_}=0"
         eval "done_${current_task//-/_}=0"
+        eval "doc_${current_task//-/_}=0"
         emit "$current_task" "tarea iniciada" "$line_ts"
       fi
       continue
@@ -104,26 +105,70 @@ process_stream() {
         emit "$current_task" "etapa 1/6: generando guion" "$line_ts" ;;
       *"## generating video terms"*)
         emit "$current_task" "etapa 2/6: generando terminos de busqueda" "$line_ts" ;;
-      *"## generating audio"*)
-        emit "$current_task" "etapa 3/6: generando audio" "$line_ts" ;;
-      *"start chatterbox-local tts"*"segments:"*)
-        n=$(printf '%s' "$clean_line" | sed -n 's/.*segments: \([0-9]*\).*/\1/p')
+      *"## generating audio and materials per segment"*)
+        # Modo documental: el audio y los clips de video se generan juntos,
+        # segmento a segmento. Marca doc_ para que el bloque de chatterbox-local
+        # (mas abajo) no pise este conteo con el suyo propio por-llamada.
+        eval "doc_${current_task//-/_}=1"
+        emit "$current_task" "etapa 3/6: generando audio y video por segmento (modo documental)" "$line_ts" ;;
+      *"documentary sync: planned "*" segments from"*)
+        n=$(printf '%s' "$clean_line" | sed -n 's/.*planned \([0-9]*\) segments from.*/\1/p')
         if [ -n "$n" ]; then
           eval "total_${current_task//-/_}=$n"
           eval "done_${current_task//-/_}=0"
+          eval "dl_total_${current_task//-/_}=$n"
+          eval "dl_${current_task//-/_}=0"
           emit "$current_task" "audio: 0/$n segmentos (0%)" "$line_ts"
         fi
         ;;
-      *"Reference mel length"*)
-        eval "t=\${total_${current_task//-/_}:-0}"
-        if [ "$t" -gt 0 ]; then
-          eval "done_${current_task//-/_}=\$(( \${done_${current_task//-/_}:-0} + 1 ))"
-          eval "d=\${done_${current_task//-/_}}"
+      *"documentary sync: audio segment "*)
+        d=$(printf '%s' "$clean_line" | sed -n 's#.*audio segment \([0-9]*\)/\([0-9]*\) synthesized.*#\1#p')
+        t=$(printf '%s' "$clean_line" | sed -n 's#.*audio segment \([0-9]*\)/\([0-9]*\) synthesized.*#\2#p')
+        if [ -n "$d" ] && [ -n "$t" ] && [ "$t" -gt 0 ]; then
+          eval "done_${current_task//-/_}=$d"
           pct=$(( d * 100 / t ))
-          # Solo escribe cada 5 segmentos (o el ultimo) para no inundar el
-          # archivo en tareas con muchos segmentos cortos.
           if [ $(( d % 5 )) -eq 0 ] || [ "$d" -eq "$t" ]; then
             emit "$current_task" "audio: $d/$t segmentos ($pct%)" "$line_ts"
+          fi
+        fi
+        ;;
+      *"documentary sync: video segment "*)
+        d=$(printf '%s' "$clean_line" | sed -n 's#.*video segment \([0-9]*\)/\([0-9]*\) downloaded.*#\1#p')
+        t=$(printf '%s' "$clean_line" | sed -n 's#.*video segment \([0-9]*\)/\([0-9]*\) downloaded.*#\2#p')
+        if [ -n "$d" ] && [ -n "$t" ] && [ "$t" -gt 0 ]; then
+          eval "dl_${current_task//-/_}=$d"
+          pct=$(( d * 100 / t ))
+          if [ $(( d % 5 )) -eq 0 ] || [ "$d" -eq "$t" ]; then
+            emit "$current_task" "descarga de videos: $d/$t clips de segmento descargados ($pct%)" "$line_ts"
+          fi
+        fi
+        ;;
+      *"## generating audio"*)
+        emit "$current_task" "etapa 3/6: generando audio" "$line_ts" ;;
+      *"start chatterbox-local tts"*"segments:"*)
+        eval "is_doc=\${doc_${current_task//-/_}:-0}"
+        if [ "$is_doc" != "1" ]; then
+          n=$(printf '%s' "$clean_line" | sed -n 's/.*segments: \([0-9]*\).*/\1/p')
+          if [ -n "$n" ]; then
+            eval "total_${current_task//-/_}=$n"
+            eval "done_${current_task//-/_}=0"
+            emit "$current_task" "audio: 0/$n segmentos (0%)" "$line_ts"
+          fi
+        fi
+        ;;
+      *"Reference mel length"*)
+        eval "is_doc=\${doc_${current_task//-/_}:-0}"
+        if [ "$is_doc" != "1" ]; then
+          eval "t=\${total_${current_task//-/_}:-0}"
+          if [ "$t" -gt 0 ]; then
+            eval "done_${current_task//-/_}=\$(( \${done_${current_task//-/_}:-0} + 1 ))"
+            eval "d=\${done_${current_task//-/_}}"
+            pct=$(( d * 100 / t ))
+            # Solo escribe cada 5 segmentos (o el ultimo) para no inundar el
+            # archivo en tareas con muchos segmentos cortos.
+            if [ $(( d % 5 )) -eq 0 ] || [ "$d" -eq "$t" ]; then
+              emit "$current_task" "audio: $d/$t segmentos ($pct%)" "$line_ts"
+            fi
           fi
         fi
         ;;

@@ -762,7 +762,11 @@ class TestDocumentarySyncVideoHelpers(unittest.TestCase):
                 mux_mock.call_args.kwargs["output_file"], combined_video_path
             )
 
-    def test_combine_videos_by_segments_skips_failed_trim_and_continues(self):
+    def test_combine_videos_by_segments_uses_placeholder_when_trim_fails(self):
+        """一个分段裁剪失败时必须用等长的占位片段补上,而不是直接丢弃 -
+        否则该分段之后的所有画面都会和唯一的整段旁白音轨错位,产生
+        永久性的音画不同步(而不仅仅是那一小段画面质量下降)。"""
+
         def fake_trim(clip_path, target_duration, output_path, video_width, video_height):
             if clip_path == "bad.mp4":
                 raise RuntimeError("boom")
@@ -773,7 +777,11 @@ class TestDocumentarySyncVideoHelpers(unittest.TestCase):
 
             with patch.object(
                 vd, "_trim_clip_to_duration", side_effect=fake_trim
-            ), patch.object(vd, "concat_video_clips_with_ffmpeg") as concat_mock, patch.object(
+            ), patch.object(
+                vd, "_write_placeholder_clip"
+            ) as placeholder_mock, patch.object(
+                vd, "concat_video_clips_with_ffmpeg"
+            ) as concat_mock, patch.object(
                 vd, "_mux_audio_into_video"
             ), patch.object(vd, "delete_files"):
                 vd.combine_videos_by_segments(
@@ -783,15 +791,21 @@ class TestDocumentarySyncVideoHelpers(unittest.TestCase):
                     audio_file=audio_file,
                 )
 
-            self.assertEqual(len(concat_mock.call_args.kwargs["clip_files"]), 1)
+            placeholder_mock.assert_called_once()
+            self.assertEqual(
+                placeholder_mock.call_args.kwargs["target_duration"], 4.0
+            )
+            self.assertEqual(len(concat_mock.call_args.kwargs["clip_files"]), 2)
 
-    def test_combine_videos_by_segments_returns_early_when_all_trims_fail(self):
+    def test_combine_videos_by_segments_returns_early_when_all_trims_and_placeholders_fail(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             combined_video_path = os.path.join(temp_dir, "combined.mp4")
             audio_file = os.path.join(temp_dir, "audio.mp3")
 
             with patch.object(
                 vd, "_trim_clip_to_duration", side_effect=RuntimeError("boom")
+            ), patch.object(
+                vd, "_write_placeholder_clip", side_effect=RuntimeError("boom")
             ), patch.object(vd, "concat_video_clips_with_ffmpeg") as concat_mock, patch.object(
                 vd, "_mux_audio_into_video"
             ) as mux_mock:

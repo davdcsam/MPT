@@ -793,6 +793,32 @@ def combine_videos(
     return combined_video_path
 
 
+def _write_placeholder_clip(
+    target_duration: float,
+    output_path: str,
+    video_width: int,
+    video_height: int,
+) -> None:
+    """Black filler used when a segment's real clip can't be trimmed.
+
+    combine_videos_by_segments() muxes one single narration track over the
+    whole concatenated video, so every clip must keep its segment's exact
+    duration - dropping a segment entirely would shift every later segment
+    out of sync with the narration for the rest of the video.
+    """
+    clip = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(
+        target_duration
+    )
+    _write_videofile_with_codec_fallback(
+        clip,
+        output_path,
+        codec=_get_configured_video_codec(),
+        logger=None,
+        fps=fps,
+    )
+    close_clip(clip)
+
+
 def _trim_clip_to_duration(
     clip_path: str,
     target_duration: float,
@@ -886,9 +912,22 @@ def combine_videos_by_segments(
                 video_width=video_width,
                 video_height=video_height,
             )
-            trimmed_clip_files.append(clip_file)
         except Exception as e:
             logger.error(f"failed to trim segment {i} clip: {str(e)}")
+            try:
+                _write_placeholder_clip(
+                    target_duration=duration,
+                    output_path=clip_file,
+                    video_width=video_width,
+                    video_height=video_height,
+                )
+            except Exception as placeholder_error:
+                logger.error(
+                    f"failed to write placeholder for segment {i}: "
+                    f"{str(placeholder_error)}"
+                )
+                continue
+        trimmed_clip_files.append(clip_file)
 
     if not trimmed_clip_files:
         logger.warning("no segment clips available for merging")

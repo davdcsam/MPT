@@ -161,6 +161,9 @@ def synthesize_segments_generic(
                 combined += AudioSegment.silent(duration=int(gap * 1000))
 
             rendered.append((text, duration_seconds, 0.0, gap))
+            logger.info(
+                f"documentary sync: audio segment {i + 1}/{len(segments)} synthesized"
+            )
 
         voice.ensure_file_path_exists(output_path)
         combined.export(output_path, format="mp3")

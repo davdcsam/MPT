@@ -588,6 +588,9 @@ def download_videos_for_segments(
             return []
 
         video_paths.append(video_path)
+        logger.info(
+            f"documentary sync: video segment {i + 1}/{len(segment_keywords)} downloaded"
+        )
 
     logger.success(f"downloaded {len(video_paths)} segment videos")
     return video_paths
