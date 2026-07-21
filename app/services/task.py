@@ -3,12 +3,22 @@ import os.path
 import re
 from os import path
 
+from edge_tts import SubMaker
 from loguru import logger
 
 from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
-from app.services import llm, material, subtitle, twelvelabs, video, voice, upload_post
+from app.services import (
+    documentary_sync,
+    llm,
+    material,
+    subtitle,
+    twelvelabs,
+    video,
+    voice,
+    upload_post,
+)
 from app.services import state as sm
 from app.utils import file_security, utils
 
@@ -185,6 +195,75 @@ def generate_audio(task_id, params, video_script):
             return None, None, None
         return custom_audio_file, audio_duration, None
 
+
+def generate_audio_and_materials_by_segments(task_id, params, video_script):
+    '''
+    Documentary-sync counterpart to generate_audio() + get_video_materials().
+    Splits the script into segments, synthesizes real per-segment audio,
+    generates one search keyword per segment, and downloads one video clip
+    per segment. Never used unless params.documentary_sync_mode is True.
+    Returns:
+        - audio_file, audio_duration, sub_maker: same shape as generate_audio()
+        - segment_video_paths: one clip path per segment, in order
+        - segment_durations: each segment's audio "slot" duration in seconds
+          (spoken duration + trailing gap), matching segment_video_paths 1:1
+    On unrecoverable failure returns (None, None, None, None, None).
+    '''
+    logger.info("\n\n## generating audio and materials per segment (documentary sync mode)")
+
+    segments = documentary_sync.plan_segments(
+        video_script,
+        voice_rate=params.voice_rate,
+        min_segment_seconds=params.documentary_min_segment_seconds or 4.5,
+    )
+    if not segments:
+        logger.error("documentary sync: failed to plan any segments from the script")
+        return None, None, None, None, None
+
+    segment_keywords = llm.generate_segment_keywords(params.video_subject, segments)
+
+    audio_file = path.join(utils.task_dir(task_id), "audio.mp3")
+    try:
+        rendered_segments = documentary_sync.synthesize_segments_generic(
+            segments,
+            voice_name=voice.parse_voice_name(params.voice_name),
+            voice_rate=params.voice_rate,
+            voice_volume=params.voice_volume,
+            output_path=audio_file,
+        )
+    except Exception as e:
+        logger.error(f"documentary sync: failed to synthesize segment audio: {str(e)}")
+        return None, None, None, None, None
+
+    sub_maker = voice.ensure_legacy_submaker_fields(SubMaker())
+    sub_maker = voice.populate_submaker_from_segment_durations(
+        sub_maker, rendered_segments
+    )
+    audio_duration = math.ceil(voice.get_audio_duration(sub_maker))
+    if audio_duration == 0:
+        logger.error("documentary sync: failed to get audio duration.")
+        return None, None, None, None, None
+
+    segment_durations = [
+        spoken_duration + post_pause
+        for _, spoken_duration, _, post_pause in rendered_segments
+    ]
+
+    segment_video_paths = material.download_videos_for_segments(
+        task_id=task_id,
+        segment_keywords=segment_keywords,
+        video_subject=params.video_subject,
+        source=params.video_source,
+        video_aspect=params.video_aspect,
+        minimum_duration=max(1, int(params.documentary_min_segment_seconds or 4)),
+    )
+    if not segment_video_paths:
+        logger.error("documentary sync: failed to download any segment videos.")
+        return None, None, None, None, None
+
+    return audio_file, audio_duration, sub_maker, segment_video_paths, segment_durations
+
+
 def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     '''
     Generate subtitle for the video script.
@@ -274,7 +353,13 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path
+    task_id,
+    params,
+    downloaded_videos,
+    audio_file,
+    subtitle_path,
+    segment_video_paths=None,
+    segment_durations=None,
 ):
     final_video_paths = []
     combined_video_paths = []
@@ -295,16 +380,26 @@ def generate_final_videos(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
         logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-        )
+        if segment_durations:
+            video.combine_videos_by_segments(
+                combined_video_path=combined_video_path,
+                segment_video_paths=segment_video_paths,
+                segment_durations=segment_durations,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                threads=params.n_threads,
+            )
+        else:
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+            )
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
@@ -349,7 +444,13 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 2. Generate terms
     video_terms = ""
-    if params.video_source != "local":
+    segment_video_paths = None
+    segment_durations = None
+    if params.documentary_sync_mode:
+        # Per-segment keywords replace the single global term list, so the
+        # global terms call is skipped entirely in this mode.
+        logger.info("\n\n## documentary sync mode enabled, skipping global video terms")
+    elif params.video_source != "local":
         video_terms = generate_terms(task_id, params, video_script)
         if not video_terms:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
@@ -366,9 +467,18 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
 
     # 3. Generate audio
-    audio_file, audio_duration, sub_maker = generate_audio(
-        task_id, params, video_script
-    )
+    if params.documentary_sync_mode:
+        (
+            audio_file,
+            audio_duration,
+            sub_maker,
+            segment_video_paths,
+            segment_durations,
+        ) = generate_audio_and_materials_by_segments(task_id, params, video_script)
+    else:
+        audio_file, audio_duration, sub_maker = generate_audio(
+            task_id, params, video_script
+        )
     if not audio_file:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
@@ -401,9 +511,13 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
     # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id, params, video_terms, audio_duration
-    )
+    if params.documentary_sync_mode:
+        # Already downloaded per-segment alongside audio in step 3.
+        downloaded_videos = segment_video_paths
+    else:
+        downloaded_videos = get_video_materials(
+            task_id, params, video_terms, audio_duration
+        )
     if not downloaded_videos:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
@@ -425,8 +539,22 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
+    if params.documentary_sync_mode and params.video_count != 1:
+        # The segment-based combiner is deterministic per run; repeating it
+        # produces identical output, so more than one variant adds no value.
+        logger.info(
+            "documentary sync mode is deterministic per segment, forcing video_count=1"
+        )
+        params.video_count = 1
+
     final_video_paths, combined_video_paths = generate_final_videos(
-        task_id, params, downloaded_videos, audio_file, subtitle_path
+        task_id,
+        params,
+        downloaded_videos,
+        audio_file,
+        subtitle_path,
+        segment_video_paths=segment_video_paths,
+        segment_durations=segment_durations,
     )
 
     if not final_video_paths:
