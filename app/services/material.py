@@ -470,6 +470,118 @@ def _download_videos_by_script_order(
     return video_paths
 
 
+# Relaxed minimum duration used as a fallback step when a segment's exact
+# `minimum_duration` search comes back empty - most stock libraries have far
+# more short clips than clips long enough for a 6-8s narration segment.
+_RELAXED_MINIMUM_DURATION_SECONDS = 1
+
+
+def download_video_for_segment(
+    task_id: str,
+    search_term: str,
+    fallback_search_term: str,
+    source: str = "pexels",
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    minimum_duration: int = 4,
+    material_directory: str = "",
+) -> str:
+    """Download one clip for one documentary-sync segment. Never raises.
+
+    Fallback ladder, each step only tried if the previous found nothing:
+    1. `search_term` (segment-specific + general context) at full `minimum_duration`.
+    2. same `search_term`, relaxed to a short minimum duration.
+    3. `fallback_search_term` (general context only), relaxed minimum duration.
+    Returns "" if every step comes up empty - the caller decides how to
+    handle a missing segment clip (e.g. reuse the previous segment's clip).
+    """
+    search_videos = search_videos_pexels
+    if source == "pixabay":
+        search_videos = search_videos_pixabay
+    elif source == "coverr":
+        search_videos = search_videos_coverr
+
+    attempts = [
+        (search_term, minimum_duration),
+        (search_term, _RELAXED_MINIMUM_DURATION_SECONDS),
+        (fallback_search_term, _RELAXED_MINIMUM_DURATION_SECONDS),
+    ]
+    for term, duration in attempts:
+        if not term:
+            continue
+        try:
+            video_items = search_videos(
+                search_term=term,
+                minimum_duration=duration,
+                video_aspect=video_aspect,
+            )
+        except Exception as e:
+            logger.warning(f"segment video search failed for '{term}': {str(e)}")
+            continue
+
+        for item in video_items:
+            saved_video_path = save_video(video_url=item.url, save_dir=material_directory)
+            if saved_video_path:
+                return saved_video_path
+
+    logger.warning(
+        f"task_id: {task_id}, no video material found for segment "
+        f"(search_term='{search_term}', fallback='{fallback_search_term}')"
+    )
+    return ""
+
+
+def download_videos_for_segments(
+    task_id: str,
+    segment_keywords: List[str],
+    video_subject: str,
+    source: str = "pexels",
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    minimum_duration: int = 4,
+    material_directory: str = "",
+) -> List[str]:
+    """Download one clip per segment keyword, in order. Never raises.
+
+    If a segment has no candidate at all, reuses the previous segment's clip
+    path (visually reads as "same scene continues" rather than a hard gap).
+    Only the very first segment failing with nothing to reuse is an
+    unrecoverable failure, surfaced as an empty list.
+    """
+    configured_material_directory = material_directory
+    if not configured_material_directory:
+        raw_material_directory = config.app.get("material_directory", "").strip()
+        if raw_material_directory == "task":
+            configured_material_directory = utils.task_dir(task_id)
+        elif raw_material_directory and os.path.isdir(raw_material_directory):
+            configured_material_directory = raw_material_directory
+
+    video_paths: List[str] = []
+    for i, keyword in enumerate(segment_keywords):
+        video_path = download_video_for_segment(
+            task_id=task_id,
+            search_term=keyword,
+            fallback_search_term=video_subject,
+            source=source,
+            video_aspect=video_aspect,
+            minimum_duration=minimum_duration,
+            material_directory=configured_material_directory,
+        )
+
+        if not video_path and video_paths:
+            logger.warning(
+                f"segment {i}: no video found, reusing previous segment's clip"
+            )
+            video_path = video_paths[-1]
+
+        if not video_path:
+            logger.error(f"segment {i}: no video found and no previous clip to reuse")
+            return []
+
+        video_paths.append(video_path)
+
+    logger.success(f"downloaded {len(video_paths)} segment videos")
+    return video_paths
+
+
 if __name__ == "__main__":
     download_videos(
         "test123", ["Money Exchange Medium"], audio_duration=100, source="pixabay"

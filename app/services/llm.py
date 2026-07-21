@@ -939,6 +939,109 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+_SEGMENT_KEYWORDS_MAX_RETRIES = 3
+
+
+def _fallback_segment_keywords(video_subject: str, segments: List[str]) -> List[str]:
+    subject = (video_subject or "").strip()
+    keywords = []
+    for segment in segments:
+        first_words = " ".join((segment or "").split()[:4])
+        keyword = f"{subject} {first_words}".strip() if subject else first_words
+        keywords.append(keyword or subject or "video")
+    return keywords
+
+
+def _parse_segment_keywords(response: str, expected_count: int) -> List[str]:
+    keywords = json.loads(_strip_code_fence(response))
+    if not isinstance(keywords, list):
+        raise ValueError("response is not a JSON array")
+    if len(keywords) != expected_count:
+        raise ValueError(
+            f"expected {expected_count} keywords, got {len(keywords)}"
+        )
+    if not all(isinstance(k, str) and k.strip() for k in keywords):
+        raise ValueError("response contains a non-string or empty keyword")
+    return [k.strip() for k in keywords]
+
+
+def generate_segment_keywords(video_subject: str, segments: List[str]) -> List[str]:
+    """Generate one stock-video search keyword per script segment.
+
+    A single LLM call (not one per segment): the prompt lists every segment
+    once, gives `video_subject` as shared context once, and asks for a JSON
+    array of exactly `len(segments)` keywords - each combining the overall
+    video theme with that specific segment's content, so downloaded footage
+    matches both. Never raises: falls back to a deterministic
+    "subject + first words" keyword per segment if the LLM is unavailable or
+    keeps returning invalid output.
+    """
+    if not segments:
+        return []
+
+    numbered_segments = "\n".join(
+        f"{i + 1}. {segment}" for i, segment in enumerate(segments)
+    )
+    prompt = f"""
+# Role: Documentary Video Search Keyword Generator
+
+## Goal
+Generate exactly {len(segments)} stock-video search keywords, one per numbered script
+segment below, so downloaded footage matches both the overall video subject and what
+that specific segment says.
+
+## Constrains:
+1. return exactly {len(segments)} keywords as a json-array of strings, in the same order
+   as the segments.
+2. each keyword should consist of 2-5 words, and should combine the general video
+   subject with the specific visual content of that segment.
+3. you must only return the json-array of strings. you must not return anything else.
+4. reply with english search terms only.
+
+## Output Example (for 3 segments):
+["subject topic a", "subject topic b", "subject topic c"]
+
+## Context:
+### Video Subject
+{video_subject}
+
+### Script Segments
+{numbered_segments}
+
+Please note that you must use English for generating video search terms; Chinese is not accepted.
+""".strip()
+
+    logger.info(
+        f"generating segment keywords: subject={video_subject}, segments={len(segments)}"
+    )
+
+    raw_response = ""
+    last_error = ""
+    for attempt in range(1, _SEGMENT_KEYWORDS_MAX_RETRIES + 1):
+        try:
+            raw_response = _generate_response(prompt)
+            if isinstance(raw_response, str) and raw_response.startswith("Error: "):
+                raise ValueError(raw_response)
+            keywords = _parse_segment_keywords(raw_response, len(segments))
+            logger.success(f"completed: \n{keywords}")
+            return keywords
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(
+                f"failed to generate segment keywords (attempt {attempt}/"
+                f"{_SEGMENT_KEYWORDS_MAX_RETRIES}): {last_error}"
+            )
+            if attempt < _SEGMENT_KEYWORDS_MAX_RETRIES and raw_response:
+                prompt = (
+                    f"{prompt}\n\nYour previous response was invalid: {last_error}\n\n"
+                    f"Previous response:\n{raw_response}\n\nRespond with ONLY the "
+                    "corrected json-array of strings."
+                )
+
+    logger.warning("falling back to heuristic segment keywords")
+    return _fallback_segment_keywords(video_subject, segments)
+
+
 # =============================================================================
 # Social publishing metadata
 #

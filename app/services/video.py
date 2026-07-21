@@ -22,6 +22,7 @@ from moviepy import (
     TextClip,
     VideoFileClip,
     afx,
+    vfx,
 )
 from moviepy.video.tools.subtitles import SubtitlesClip
 from PIL import Image, ImageDraw, ImageFont
@@ -789,6 +790,130 @@ def combine_videos(
     delete_files(silent_video_path)
 
     logger.info("video combining completed")
+    return combined_video_path
+
+
+def _trim_clip_to_duration(
+    clip_path: str,
+    target_duration: float,
+    output_path: str,
+    video_width: int,
+    video_height: int,
+) -> float:
+    """Render one documentary-sync segment's clip trimmed/looped to an exact duration.
+
+    Duplicates combine_videos()'s resize/letterbox logic (rather than
+    extracting it) so combine_videos() itself never has to change.
+    """
+    clip = _open_video_clip_quietly(clip_path)
+    clip_duration = clip.duration
+    clip_w, clip_h = clip.size
+    if clip_w != video_width or clip_h != video_height:
+        clip_ratio = clip.w / clip.h
+        video_ratio = video_width / video_height
+
+        if clip_ratio == video_ratio:
+            clip = clip.resized(new_size=(video_width, video_height))
+        else:
+            if clip_ratio > video_ratio:
+                scale_factor = video_width / clip_w
+            else:
+                scale_factor = video_height / clip_h
+
+            new_width = int(clip_w * scale_factor)
+            new_height = int(clip_h * scale_factor)
+
+            background = ColorClip(
+                size=(video_width, video_height), color=(0, 0, 0)
+            ).with_duration(clip_duration)
+            clip_resized = clip.resized(new_size=(new_width, new_height)).with_position(
+                "center"
+            )
+            clip = CompositeVideoClip([background, clip_resized])
+
+    if clip.duration >= target_duration:
+        clip = clip.subclipped(0, target_duration)
+    else:
+        clip = clip.with_effects([vfx.Loop(duration=target_duration)])
+
+    _write_videofile_with_codec_fallback(
+        clip,
+        output_path,
+        codec=_get_configured_video_codec(),
+        logger=None,
+        fps=fps,
+    )
+    trimmed_duration = clip.duration
+    close_clip(clip)
+    return trimmed_duration
+
+
+def combine_videos_by_segments(
+    combined_video_path: str,
+    segment_video_paths: List[str],
+    segment_durations: List[float],
+    audio_file: str,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    threads: int = 2,
+) -> str:
+    """Opt-in counterpart to combine_videos() for documentary_sync_mode.
+
+    Each segment's pre-selected clip is trimmed/looped to that segment's own
+    measured audio duration (instead of chopping all clips into fixed
+    max_clip_duration blocks), then concatenated in order and muxed against
+    the single combined narration audio file - same output contract as
+    combine_videos(). Never modifies combine_videos() itself.
+    """
+    if len(segment_video_paths) != len(segment_durations):
+        raise ValueError(
+            "segment_video_paths and segment_durations must have the same length"
+        )
+
+    aspect = VideoAspect(video_aspect)
+    video_width, video_height = aspect.to_resolution()
+    output_dir = os.path.dirname(combined_video_path)
+
+    trimmed_clip_files = []
+    for i, (video_path, duration) in enumerate(
+        zip(segment_video_paths, segment_durations)
+    ):
+        clip_file = os.path.join(output_dir, f"temp-segment-clip-{i + 1}.mp4")
+        try:
+            _trim_clip_to_duration(
+                clip_path=video_path,
+                target_duration=duration,
+                output_path=clip_file,
+                video_width=video_width,
+                video_height=video_height,
+            )
+            trimmed_clip_files.append(clip_file)
+        except Exception as e:
+            logger.error(f"failed to trim segment {i} clip: {str(e)}")
+
+    if not trimmed_clip_files:
+        logger.warning("no segment clips available for merging")
+        return combined_video_path
+
+    logger.info(f"concatenating {len(trimmed_clip_files)} segment clips with ffmpeg")
+    silent_video_path = os.path.join(output_dir, "temp-combined-silent.mp4")
+    concat_video_clips_with_ffmpeg(
+        clip_files=trimmed_clip_files,
+        output_file=silent_video_path,
+        threads=threads,
+        output_dir=output_dir,
+    )
+
+    logger.info("muxing narration audio into combined video")
+    _mux_audio_into_video(
+        video_path=silent_video_path,
+        audio_path=audio_file,
+        output_file=combined_video_path,
+    )
+
+    delete_files(trimmed_clip_files)
+    delete_files(silent_video_path)
+
+    logger.info("segment-based video combining completed")
     return combined_video_path
 
 
