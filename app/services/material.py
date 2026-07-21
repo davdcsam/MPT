@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import threading
@@ -534,18 +535,28 @@ def download_videos_for_segments(
     task_id: str,
     segment_keywords: List[str],
     video_subject: str,
+    segment_durations: List[float],
     source: str = "pexels",
     video_aspect: VideoAspect = VideoAspect.portrait,
-    minimum_duration: int = 4,
     material_directory: str = "",
 ) -> List[str]:
     """Download one clip per segment keyword, in order. Never raises.
+
+    Each segment searches for a clip at least as long as that segment's own
+    real (TTS-measured) duration, not a single duration shared by every
+    segment - otherwise a clip shorter than a long segment gets looped
+    (vfx.Loop) to fill it, which shows up as a visible restart/jump mid-shot.
 
     If a segment has no candidate at all, reuses the previous segment's clip
     path (visually reads as "same scene continues" rather than a hard gap).
     Only the very first segment failing with nothing to reuse is an
     unrecoverable failure, surfaced as an empty list.
     """
+    if len(segment_keywords) != len(segment_durations):
+        raise ValueError(
+            "segment_keywords and segment_durations must have the same length"
+        )
+
     configured_material_directory = material_directory
     if not configured_material_directory:
         raw_material_directory = config.app.get("material_directory", "").strip()
@@ -562,7 +573,7 @@ def download_videos_for_segments(
             fallback_search_term=video_subject,
             source=source,
             video_aspect=video_aspect,
-            minimum_duration=minimum_duration,
+            minimum_duration=max(1, math.ceil(segment_durations[i])),
             material_directory=configured_material_directory,
         )
 

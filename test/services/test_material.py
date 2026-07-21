@@ -513,9 +513,42 @@ class TestDownloadForSegments(unittest.TestCase):
                 task_id="t1",
                 segment_keywords=["a keyword", "b keyword"],
                 video_subject="coffee",
+                segment_durations=[4.5, 6.2],
             )
 
         self.assertEqual(result, ["/tmp/a.mp4", "/tmp/b.mp4"])
+
+    def test_download_videos_for_segments_uses_each_segments_own_duration(self):
+        """每段搜索的 minimum_duration 必须来自该段自己的真实音频时长,
+        而不是所有分段共用同一个值 - 否则短片段会被 vfx.Loop 拉伸,
+        在长分段里出现可见的跳回重播。"""
+        seen_durations = {}
+
+        def fake_download(task_id, search_term, fallback_search_term, **kwargs):
+            seen_durations[search_term] = kwargs["minimum_duration"]
+            return f"/tmp/{search_term.replace(' ', '_')}.mp4"
+
+        with patch.object(
+            material, "download_video_for_segment", side_effect=fake_download
+        ):
+            material.download_videos_for_segments(
+                task_id="t1",
+                segment_keywords=["short keyword", "long keyword"],
+                video_subject="coffee",
+                segment_durations=[3.2, 11.7],
+            )
+
+        self.assertEqual(seen_durations["short keyword"], 4)
+        self.assertEqual(seen_durations["long keyword"], 12)
+
+    def test_download_videos_for_segments_rejects_mismatched_lengths(self):
+        with self.assertRaises(ValueError):
+            material.download_videos_for_segments(
+                task_id="t1",
+                segment_keywords=["a keyword", "b keyword"],
+                video_subject="coffee",
+                segment_durations=[4.5],
+            )
 
     def test_download_videos_for_segments_reuses_previous_clip_on_mid_failure(self):
         def fake_download(task_id, search_term, fallback_search_term, **kwargs):
@@ -530,6 +563,7 @@ class TestDownloadForSegments(unittest.TestCase):
                 task_id="t1",
                 segment_keywords=["a keyword", "b keyword", "c keyword"],
                 video_subject="coffee",
+                segment_durations=[4.5, 5.0, 4.8],
             )
 
         self.assertEqual(
@@ -542,6 +576,7 @@ class TestDownloadForSegments(unittest.TestCase):
                 task_id="t1",
                 segment_keywords=["a keyword", "b keyword"],
                 video_subject="coffee",
+                segment_durations=[4.5, 5.0],
             )
 
         self.assertEqual(result, [])

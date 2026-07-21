@@ -47,8 +47,6 @@
     "Match Materials to Script Order Help": "Disabled by default. Mainly applies to online material sources. When enabled, keywords are generated in script order and materials are downloaded/combined in that order to reduce visual mismatch with the current voiceover.",
     "Documentary Sync Mode": "Documentary sync mode",
     "Documentary Sync Mode Help": "Disabled by default. Splits the script into segments, synthesizes real audio for each segment, and matches each one to its own video clip trimmed to that exact duration, so camera cuts land on sentence boundaries instead of a fixed clock. Forces video count to 1.",
-    "Minimum Segment Duration (seconds)": "Minimum segment duration (seconds)",
-    "Minimum Segment Duration Help": "Short sentences are merged forward until a segment reaches at least this duration, to avoid overly choppy cuts.",
     "Audio Settings": "**Audio Settings**",
     "Speech Synthesis": "Speech Synthesis Voice",
     "Speech Region": "Region(:red[Required，[Get Region](https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/SpeechServices)])",

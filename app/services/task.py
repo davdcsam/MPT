@@ -253,9 +253,9 @@ def generate_audio_and_materials_by_segments(task_id, params, video_script):
         task_id=task_id,
         segment_keywords=segment_keywords,
         video_subject=params.video_subject,
+        segment_durations=segment_durations,
         source=params.video_source,
         video_aspect=params.video_aspect,
-        minimum_duration=max(1, int(params.documentary_min_segment_seconds or 4)),
     )
     if not segment_video_paths:
         logger.error("documentary sync: failed to download any segment videos.")
