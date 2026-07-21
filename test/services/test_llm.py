@@ -144,6 +144,72 @@ class TestScriptPromptOptions(unittest.TestCase):
             )
 
 
+class TestGenerateSegmentKeywords(unittest.TestCase):
+    def test_generate_segment_keywords_returns_empty_for_no_segments(self):
+        with patch.object(llm, "_generate_response") as mocked:
+            result = llm.generate_segment_keywords("coffee", [])
+
+        mocked.assert_not_called()
+        self.assertEqual(result, [])
+
+    def test_generate_segment_keywords_parses_valid_json_response(self):
+        captured = {}
+
+        def fake_generate_response(prompt):
+            captured["prompt"] = prompt
+            return '["coffee brewing", "coffee beans farm"]'
+
+        with patch.object(llm, "_generate_response", side_effect=fake_generate_response) as mocked:
+            result = llm.generate_segment_keywords(
+                "coffee", ["Brewing a fresh cup.", "Where the beans grow."]
+            )
+
+        mocked.assert_called_once()
+        self.assertEqual(result, ["coffee brewing", "coffee beans farm"])
+        self.assertIn("coffee", captured["prompt"])
+        self.assertIn("Brewing a fresh cup.", captured["prompt"])
+        self.assertIn("Where the beans grow.", captured["prompt"])
+        self.assertIn("exactly 2 keywords", captured["prompt"])
+
+    def test_generate_segment_keywords_self_repairs_once_on_invalid_json(self):
+        with patch.object(
+            llm,
+            "_generate_response",
+            side_effect=["not json at all", '["coffee brewing"]'],
+        ) as mocked:
+            result = llm.generate_segment_keywords("coffee", ["Brewing a fresh cup."])
+
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(result, ["coffee brewing"])
+
+    def test_generate_segment_keywords_falls_back_after_repeated_failures(self):
+        with patch.object(
+            llm,
+            "_generate_response",
+            side_effect=["garbage", "still garbage", "still garbage again"],
+        ) as mocked:
+            result = llm.generate_segment_keywords(
+                "coffee", ["Brewing a fresh morning cup of coffee."]
+            )
+
+        self.assertEqual(mocked.call_count, 3)
+        self.assertEqual(len(result), 1)
+        self.assertIn("coffee", result[0])
+
+    def test_generate_segment_keywords_falls_back_when_count_mismatches(self):
+        with patch.object(
+            llm,
+            "_generate_response",
+            return_value='["only one keyword"]',
+        ) as mocked:
+            result = llm.generate_segment_keywords(
+                "coffee", ["First segment.", "Second segment."]
+            )
+
+        self.assertEqual(mocked.call_count, 3)
+        self.assertEqual(len(result), 2)
+
+
 class TestLiteLLMProvider(unittest.TestCase):
     def setUp(self):
         self.original_app_config = dict(config.app)

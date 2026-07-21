@@ -662,5 +662,150 @@ class TestVideoService(unittest.TestCase):
                     self.assertEqual(result, "/some/output/dir")
 
 
+class _FakeSegmentClip:
+    def __init__(self, duration, size=(1080, 1920)):
+        self.duration = duration
+        self.size = size
+        self.w = size[0]
+        self.h = size[1]
+
+    def subclipped(self, start_time, end_time):
+        return _FakeSegmentClip(end_time - start_time, size=self.size)
+
+    def with_effects(self, effects):
+        clip = _FakeSegmentClip(self.duration, size=self.size)
+        for effect in effects:
+            if getattr(effect, "duration", None):
+                clip.duration = effect.duration
+        return clip
+
+
+class TestDocumentarySyncVideoHelpers(unittest.TestCase):
+    """documentary_sync_mode 的视频侧支持函数：不改动 combine_videos() 本身。"""
+
+    def test_trim_clip_to_duration_subclips_when_longer_than_target(self):
+        fake_clip = _FakeSegmentClip(duration=8.0)
+        with patch.object(
+            vd, "_open_video_clip_quietly", return_value=fake_clip
+        ), patch.object(vd, "_write_videofile_with_codec_fallback") as write_mock, patch.object(
+            vd, "close_clip"
+        ) as close_mock:
+            result = vd._trim_clip_to_duration(
+                clip_path="clip.mp4",
+                target_duration=4.5,
+                output_path="/tmp/out.mp4",
+                video_width=1080,
+                video_height=1920,
+            )
+
+        self.assertAlmostEqual(result, 4.5)
+        write_mock.assert_called_once()
+        close_mock.assert_called_once()
+
+    def test_trim_clip_to_duration_loops_when_shorter_than_target(self):
+        fake_clip = _FakeSegmentClip(duration=2.0)
+        with patch.object(
+            vd, "_open_video_clip_quietly", return_value=fake_clip
+        ), patch.object(vd, "_write_videofile_with_codec_fallback"), patch.object(
+            vd, "close_clip"
+        ):
+            result = vd._trim_clip_to_duration(
+                clip_path="clip.mp4",
+                target_duration=5.0,
+                output_path="/tmp/out.mp4",
+                video_width=1080,
+                video_height=1920,
+            )
+
+        self.assertAlmostEqual(result, 5.0)
+
+    def test_combine_videos_by_segments_raises_on_length_mismatch(self):
+        with self.assertRaises(ValueError):
+            vd.combine_videos_by_segments(
+                combined_video_path="/tmp/unused-combined.mp4",
+                segment_video_paths=["a.mp4"],
+                segment_durations=[1.0, 2.0],
+                audio_file="/tmp/unused-audio.mp3",
+            )
+
+    def test_combine_videos_by_segments_trims_each_clip_and_muxes_audio(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            combined_video_path = os.path.join(temp_dir, "combined.mp4")
+            audio_file = os.path.join(temp_dir, "audio.mp3")
+
+            with patch.object(vd, "_trim_clip_to_duration") as trim_mock, patch.object(
+                vd, "concat_video_clips_with_ffmpeg"
+            ) as concat_mock, patch.object(
+                vd, "_mux_audio_into_video"
+            ) as mux_mock, patch.object(vd, "delete_files"):
+                result = vd.combine_videos_by_segments(
+                    combined_video_path=combined_video_path,
+                    segment_video_paths=["seg-1.mp4", "seg-2.mp4"],
+                    segment_durations=[4.5, 5.0],
+                    audio_file=audio_file,
+                    video_aspect=vd.VideoAspect.portrait,
+                )
+
+            self.assertEqual(result, combined_video_path)
+            self.assertEqual(trim_mock.call_count, 2)
+            self.assertEqual(
+                trim_mock.call_args_list[0].kwargs["target_duration"], 4.5
+            )
+            self.assertEqual(
+                trim_mock.call_args_list[1].kwargs["target_duration"], 5.0
+            )
+            concat_mock.assert_called_once()
+            self.assertEqual(len(concat_mock.call_args.kwargs["clip_files"]), 2)
+            mux_mock.assert_called_once()
+            self.assertEqual(mux_mock.call_args.kwargs["audio_path"], audio_file)
+            self.assertEqual(
+                mux_mock.call_args.kwargs["output_file"], combined_video_path
+            )
+
+    def test_combine_videos_by_segments_skips_failed_trim_and_continues(self):
+        def fake_trim(clip_path, target_duration, output_path, video_width, video_height):
+            if clip_path == "bad.mp4":
+                raise RuntimeError("boom")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            combined_video_path = os.path.join(temp_dir, "combined.mp4")
+            audio_file = os.path.join(temp_dir, "audio.mp3")
+
+            with patch.object(
+                vd, "_trim_clip_to_duration", side_effect=fake_trim
+            ), patch.object(vd, "concat_video_clips_with_ffmpeg") as concat_mock, patch.object(
+                vd, "_mux_audio_into_video"
+            ), patch.object(vd, "delete_files"):
+                vd.combine_videos_by_segments(
+                    combined_video_path=combined_video_path,
+                    segment_video_paths=["bad.mp4", "good.mp4"],
+                    segment_durations=[4.0, 5.0],
+                    audio_file=audio_file,
+                )
+
+            self.assertEqual(len(concat_mock.call_args.kwargs["clip_files"]), 1)
+
+    def test_combine_videos_by_segments_returns_early_when_all_trims_fail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            combined_video_path = os.path.join(temp_dir, "combined.mp4")
+            audio_file = os.path.join(temp_dir, "audio.mp3")
+
+            with patch.object(
+                vd, "_trim_clip_to_duration", side_effect=RuntimeError("boom")
+            ), patch.object(vd, "concat_video_clips_with_ffmpeg") as concat_mock, patch.object(
+                vd, "_mux_audio_into_video"
+            ) as mux_mock:
+                result = vd.combine_videos_by_segments(
+                    combined_video_path=combined_video_path,
+                    segment_video_paths=["bad-1.mp4", "bad-2.mp4"],
+                    segment_durations=[4.0, 5.0],
+                    audio_file=audio_file,
+                )
+
+            self.assertEqual(result, combined_video_path)
+            concat_mock.assert_not_called()
+            mux_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

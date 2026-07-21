@@ -426,5 +426,126 @@ class TestCoverrProvider(unittest.TestCase):
         self.assertEqual(result, ["/tmp/coverr-saved.mp4"])
 
 
+class TestDownloadForSegments(unittest.TestCase):
+    """documentary_sync_mode 的按分段下载素材:每段一个关键词、一个候选。"""
+
+    def test_download_video_for_segment_succeeds_on_first_attempt(self):
+        clip = material.MaterialInfo(provider="pexels", url="https://v.example/a.mp4", duration=6)
+        with patch.object(
+            material, "search_videos_pexels", return_value=[clip]
+        ) as search, patch.object(
+            material, "save_video", return_value="/tmp/a.mp4"
+        ):
+            result = material.download_video_for_segment(
+                task_id="t1",
+                search_term="coffee brewing",
+                fallback_search_term="coffee",
+                minimum_duration=4,
+            )
+
+        self.assertEqual(result, "/tmp/a.mp4")
+        search.assert_called_once()
+        self.assertEqual(search.call_args.kwargs["minimum_duration"], 4)
+
+    def test_download_video_for_segment_relaxes_duration_before_falling_back(self):
+        clip = material.MaterialInfo(provider="pexels", url="https://v.example/b.mp4", duration=1)
+
+        def fake_search(search_term, minimum_duration, video_aspect):
+            if search_term == "coffee brewing" and minimum_duration == 1:
+                return [clip]
+            return []
+
+        with patch.object(
+            material, "search_videos_pexels", side_effect=fake_search
+        ) as search, patch.object(material, "save_video", return_value="/tmp/b.mp4"):
+            result = material.download_video_for_segment(
+                task_id="t1",
+                search_term="coffee brewing",
+                fallback_search_term="coffee",
+                minimum_duration=4,
+            )
+
+        self.assertEqual(result, "/tmp/b.mp4")
+        self.assertEqual(search.call_count, 2)
+
+    def test_download_video_for_segment_falls_back_to_general_keyword(self):
+        clip = material.MaterialInfo(provider="pexels", url="https://v.example/c.mp4", duration=1)
+
+        def fake_search(search_term, minimum_duration, video_aspect):
+            if search_term == "coffee":
+                return [clip]
+            return []
+
+        with patch.object(
+            material, "search_videos_pexels", side_effect=fake_search
+        ) as search, patch.object(material, "save_video", return_value="/tmp/c.mp4"):
+            result = material.download_video_for_segment(
+                task_id="t1",
+                search_term="coffee brewing",
+                fallback_search_term="coffee",
+                minimum_duration=4,
+            )
+
+        self.assertEqual(result, "/tmp/c.mp4")
+        self.assertEqual(search.call_count, 3)
+
+    def test_download_video_for_segment_returns_empty_when_all_attempts_fail(self):
+        with patch.object(material, "search_videos_pexels", return_value=[]):
+            result = material.download_video_for_segment(
+                task_id="t1",
+                search_term="coffee brewing",
+                fallback_search_term="coffee",
+                minimum_duration=4,
+            )
+
+        self.assertEqual(result, "")
+
+    def test_download_videos_for_segments_downloads_one_per_segment_in_order(self):
+        saved_paths = {"a keyword": "/tmp/a.mp4", "b keyword": "/tmp/b.mp4"}
+
+        def fake_download(task_id, search_term, fallback_search_term, **kwargs):
+            return saved_paths[search_term]
+
+        with patch.object(
+            material, "download_video_for_segment", side_effect=fake_download
+        ):
+            result = material.download_videos_for_segments(
+                task_id="t1",
+                segment_keywords=["a keyword", "b keyword"],
+                video_subject="coffee",
+            )
+
+        self.assertEqual(result, ["/tmp/a.mp4", "/tmp/b.mp4"])
+
+    def test_download_videos_for_segments_reuses_previous_clip_on_mid_failure(self):
+        def fake_download(task_id, search_term, fallback_search_term, **kwargs):
+            if search_term == "b keyword":
+                return ""
+            return f"/tmp/{search_term.replace(' ', '_')}.mp4"
+
+        with patch.object(
+            material, "download_video_for_segment", side_effect=fake_download
+        ):
+            result = material.download_videos_for_segments(
+                task_id="t1",
+                segment_keywords=["a keyword", "b keyword", "c keyword"],
+                video_subject="coffee",
+            )
+
+        self.assertEqual(
+            result, ["/tmp/a_keyword.mp4", "/tmp/a_keyword.mp4", "/tmp/c_keyword.mp4"]
+        )
+
+    def test_download_videos_for_segments_fails_when_first_segment_has_nothing(self):
+        with patch.object(material, "download_video_for_segment", return_value=""):
+            result = material.download_videos_for_segments(
+                task_id="t1",
+                segment_keywords=["a keyword", "b keyword"],
+                video_subject="coffee",
+            )
+
+        self.assertEqual(result, [])
+
+
 if __name__ == "__main__":
     unittest.main()

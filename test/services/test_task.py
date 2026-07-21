@@ -299,5 +299,254 @@ class TestTaskService(unittest.TestCase):
         print(result)
     
 
+class TestDocumentarySyncTaskWiring(unittest.TestCase):
+    """documentary_sync_mode 的编排逻辑：只新增分支，不改动默认路径。"""
+
+    def test_generate_audio_and_materials_by_segments_returns_none_when_no_segments_planned(
+        self,
+    ):
+        params = VideoParams(video_subject="coffee", video_script="Hi.")
+        with patch.object(tm.documentary_sync, "plan_segments", return_value=[]):
+            result = tm.generate_audio_and_materials_by_segments(
+                "task-id", params, "Hi."
+            )
+        self.assertEqual(result, (None, None, None, None, None))
+
+    def test_generate_audio_and_materials_by_segments_returns_none_on_synthesis_failure(
+        self,
+    ):
+        params = VideoParams(video_subject="coffee", video_script="Hi. There.")
+        with (
+            patch.object(
+                tm.documentary_sync,
+                "plan_segments",
+                return_value=["Hi.", "There."],
+            ),
+            patch.object(
+                tm.llm, "generate_segment_keywords", return_value=["coffee cup", "coffee pot"]
+            ),
+            patch.object(
+                tm.documentary_sync,
+                "synthesize_segments_generic",
+                side_effect=RuntimeError("tts down"),
+            ),
+        ):
+            result = tm.generate_audio_and_materials_by_segments(
+                "task-id", params, "Hi. There."
+            )
+        self.assertEqual(result, (None, None, None, None, None))
+
+    def test_generate_audio_and_materials_by_segments_returns_none_when_no_videos_downloaded(
+        self,
+    ):
+        task_id = "test-doc-sync-no-videos"
+        task_dir = utils.task_dir(task_id)
+        params = VideoParams(video_subject="coffee", video_script="Hi. There.")
+        rendered = [("Hi.", 1.0, 0.0, 0.15), ("There.", 1.2, 0.0, 0.0)]
+        try:
+            with (
+                patch.object(
+                    tm.documentary_sync,
+                    "plan_segments",
+                    return_value=["Hi.", "There."],
+                ),
+                patch.object(
+                    tm.llm,
+                    "generate_segment_keywords",
+                    return_value=["coffee cup", "coffee pot"],
+                ),
+                patch.object(
+                    tm.documentary_sync,
+                    "synthesize_segments_generic",
+                    return_value=rendered,
+                ),
+                patch.object(
+                    tm.material, "download_videos_for_segments", return_value=[]
+                ),
+            ):
+                result = tm.generate_audio_and_materials_by_segments(
+                    task_id, params, "Hi. There."
+                )
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+        self.assertEqual(result, (None, None, None, None, None))
+
+    def test_generate_audio_and_materials_by_segments_happy_path(self):
+        task_id = "test-doc-sync-happy-path"
+        task_dir = utils.task_dir(task_id)
+        params = VideoParams(
+            video_subject="coffee",
+            video_script="Hi. There.",
+            voice_name="test-voice",
+            voice_rate=1.0,
+            voice_volume=1.0,
+            documentary_min_segment_seconds=4.5,
+        )
+        rendered = [("Hi.", 1.0, 0.0, 0.15), ("There.", 1.2, 0.0, 0.0)]
+        try:
+            with (
+                patch.object(
+                    tm.documentary_sync,
+                    "plan_segments",
+                    return_value=["Hi.", "There."],
+                ) as plan_segments,
+                patch.object(
+                    tm.llm,
+                    "generate_segment_keywords",
+                    return_value=["coffee cup", "coffee pot"],
+                ) as generate_keywords,
+                patch.object(
+                    tm.documentary_sync,
+                    "synthesize_segments_generic",
+                    return_value=rendered,
+                ) as synthesize,
+                patch.object(
+                    tm.material,
+                    "download_videos_for_segments",
+                    return_value=["v1.mp4", "v2.mp4"],
+                ) as download,
+            ):
+                (
+                    audio_file,
+                    audio_duration,
+                    sub_maker,
+                    segment_video_paths,
+                    segment_durations,
+                ) = tm.generate_audio_and_materials_by_segments(
+                    task_id, params, "Hi. There."
+                )
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+        plan_segments.assert_called_once_with(
+            "Hi. There.", voice_rate=1.0, min_segment_seconds=4.5
+        )
+        generate_keywords.assert_called_once_with("coffee", ["Hi.", "There."])
+        synthesize.assert_called_once()
+        download.assert_called_once()
+        self.assertEqual(download.call_args.kwargs["segment_keywords"], ["coffee cup", "coffee pot"])
+
+        self.assertTrue(audio_file.endswith("audio.mp3"))
+        self.assertEqual(audio_duration, 3)
+        self.assertIsNotNone(sub_maker)
+        self.assertEqual(segment_video_paths, ["v1.mp4", "v2.mp4"])
+        self.assertEqual(segment_durations, [1.15, 1.2])
+
+    def test_generate_final_videos_uses_segment_combiner_when_segment_durations_present(
+        self,
+    ):
+        task_id = "test-doc-sync-final-videos-segments"
+        task_dir = utils.task_dir(task_id)
+        params = VideoParams(
+            video_subject="coffee", video_script="Hi.", video_count=1
+        )
+        try:
+            with (
+                patch.object(tm.video, "combine_videos_by_segments") as combine_segments,
+                patch.object(tm.video, "combine_videos") as combine_default,
+                patch.object(tm.video, "generate_video"),
+            ):
+                tm.generate_final_videos(
+                    task_id,
+                    params,
+                    ["ignored.mp4"],
+                    "audio.mp3",
+                    "subtitle.srt",
+                    segment_video_paths=["v1.mp4", "v2.mp4"],
+                    segment_durations=[1.15, 1.2],
+                )
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+        combine_segments.assert_called_once()
+        combine_default.assert_not_called()
+        self.assertEqual(
+            combine_segments.call_args.kwargs["segment_video_paths"], ["v1.mp4", "v2.mp4"]
+        )
+        self.assertEqual(
+            combine_segments.call_args.kwargs["segment_durations"], [1.15, 1.2]
+        )
+
+    def test_generate_final_videos_uses_default_combiner_when_no_segment_durations(
+        self,
+    ):
+        """回归测试：不传 segment_durations 时，行为与改动前完全一致。"""
+        task_id = "test-doc-sync-final-videos-default"
+        task_dir = utils.task_dir(task_id)
+        params = VideoParams(
+            video_subject="coffee", video_script="Hi.", video_count=1
+        )
+        try:
+            with (
+                patch.object(tm.video, "combine_videos_by_segments") as combine_segments,
+                patch.object(tm.video, "combine_videos") as combine_default,
+                patch.object(tm.video, "generate_video"),
+            ):
+                tm.generate_final_videos(
+                    task_id,
+                    params,
+                    ["a.mp4", "b.mp4"],
+                    "audio.mp3",
+                    "subtitle.srt",
+                )
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+        combine_default.assert_called_once()
+        combine_segments.assert_not_called()
+
+    def test_start_documentary_sync_mode_uses_segment_orchestrator_and_forces_video_count(
+        self,
+    ):
+        task_id = "test-doc-sync-start"
+        task_dir = utils.task_dir(task_id)
+        params = VideoParams(
+            video_subject="coffee",
+            video_script="Hi. There.",
+            documentary_sync_mode=True,
+            video_count=2,
+        )
+        try:
+            with (
+                patch.object(tm, "generate_script", return_value="Hi. There."),
+                patch.object(tm, "generate_terms") as generate_terms,
+                patch.object(
+                    tm,
+                    "generate_audio_and_materials_by_segments",
+                    return_value=(
+                        os.path.join(task_dir, "audio.mp3"),
+                        5,
+                        object(),
+                        ["v1.mp4", "v2.mp4"],
+                        [1.15, 1.2],
+                    ),
+                ) as generate_audio_segments,
+                patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+                patch.object(tm, "get_video_materials") as get_video_materials,
+                patch.object(
+                    tm,
+                    "generate_final_videos",
+                    return_value=(["final-1.mp4"], ["combined-1.mp4"]),
+                ) as generate_final_videos,
+            ):
+                tm.start(task_id=task_id, params=params)
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+        generate_terms.assert_not_called()
+        get_video_materials.assert_not_called()
+        generate_audio_segments.assert_called_once()
+        self.assertEqual(params.video_count, 1)
+        generate_final_videos.assert_called_once()
+        self.assertEqual(
+            generate_final_videos.call_args.kwargs["segment_video_paths"],
+            ["v1.mp4", "v2.mp4"],
+        )
+        self.assertEqual(
+            generate_final_videos.call_args.kwargs["segment_durations"],
+            [1.15, 1.2],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

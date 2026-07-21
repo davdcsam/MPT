@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from app.models.schema import VideoAspect
+from app.models.schema import VideoAspect, VideoParams
 
 
 class TestVideoAspect(unittest.TestCase):
@@ -16,6 +16,13 @@ class TestVideoAspect(unittest.TestCase):
     def test_to_resolution_rejects_unsupported_value(self):
         with self.assertRaises(ValueError):
             VideoAspect.to_resolution("4:5")
+
+
+class TestVideoParamsDocumentarySyncDefaults(unittest.TestCase):
+    def test_documentary_sync_mode_is_opt_in_by_default(self):
+        params = VideoParams(video_subject="test")
+        self.assertFalse(params.documentary_sync_mode)
+        self.assertEqual(params.documentary_min_segment_seconds, 4.5)
 
 
 if __name__ == "__main__":
