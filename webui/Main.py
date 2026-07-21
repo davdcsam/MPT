@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sys
 import webbrowser
 from uuid import UUID, uuid4
@@ -162,6 +163,7 @@ _SESSION_STATE_RESTORE_EXCLUDE = {
     "auto_generate_script",
     "auto_generate_terms",
     "custom_audio_file_uploader",
+    "clear_storage_button",
 }
 
 # Never persist secrets (API keys/tokens) or the ElevenLabs voice cache, whose
@@ -235,6 +237,8 @@ if "match_materials_to_script" not in st.session_state:
     )
 if "ui_language" not in st.session_state:
     st.session_state["ui_language"] = config.ui.get("language", system_locale)
+if "is_generating" not in st.session_state:
+    st.session_state["is_generating"] = False
 if "local_video_materials" not in st.session_state:
     # 记住用户最近一次已经落盘的本地素材，避免仅修改文案后二次生成时丢失素材列表。
     st.session_state["local_video_materials"] = []
@@ -243,7 +247,32 @@ if "local_video_materials" not in st.session_state:
 locales = utils.load_locales(i18n_dir)
 
 # 创建一个顶部栏，包含标题和语言选择
-title_col, lang_col = st.columns([3, 1])
+def clear_generated_storage():
+    for sub_dir in ("cache_videos", "local_videos"):
+        d = utils.storage_dir(sub_dir, create=True)
+        for entry in os.listdir(d):
+            entry_path = os.path.join(d, entry)
+            if os.path.isdir(entry_path):
+                shutil.rmtree(entry_path, ignore_errors=True)
+            else:
+                try:
+                    os.remove(entry_path)
+                except OSError:
+                    pass
+
+    tasks_d = utils.task_dir()
+    for entry in os.listdir(tasks_d):
+        entry_path = os.path.join(tasks_d, entry)
+        if os.path.isdir(entry_path):
+            shutil.rmtree(entry_path, ignore_errors=True)
+        else:
+            try:
+                os.remove(entry_path)
+            except OSError:
+                pass
+
+
+title_col, lang_col, clear_col = st.columns([3, 1, 1])
 
 with title_col:
     st.title(f"MoneyPrinterTurbo v{config.project_version}")
@@ -272,6 +301,18 @@ with lang_col:
         # 切换前的展示文本，出现 provider、视频比例等选项文案混用旧语言。
         if code != previous_language:
             st.rerun()
+
+with clear_col:
+    if st.button(
+        "🧹 Limpiar caché",
+        use_container_width=True,
+        disabled=st.session_state.get("is_generating", False),
+        help="Borra storage/cache_videos, storage/local_videos y storage/tasks",
+        key="clear_storage_button",
+    ):
+        clear_generated_storage()
+        st.success("Carpetas de storage limpiadas")
+        st.rerun()
 
 support_locales = [
     "zh-CN",
@@ -1853,27 +1894,31 @@ if start_button:
     logger.info(utils.to_json(params))
     scroll_to_bottom()
 
-    result = tm.start(task_id=task_id, params=params)
-    if not result or "videos" not in result:
-        st.error(tr("Video Generation Failed"))
-        logger.error(tr("Video Generation Failed"))
-        scroll_to_bottom()
-        st.stop()
-
-    video_files = result.get("videos", [])
-    st.success(tr("Video Generation Completed"))
-    play_completion_alarm()
+    st.session_state["is_generating"] = True
     try:
-        if video_files:
-            player_cols = st.columns(len(video_files) * 2 + 1)
-            for i, url in enumerate(video_files):
-                player_cols[i * 2 + 1].video(url)
-    except Exception:
-        pass
+        result = tm.start(task_id=task_id, params=params)
+        if not result or "videos" not in result:
+            st.error(tr("Video Generation Failed"))
+            logger.error(tr("Video Generation Failed"))
+            scroll_to_bottom()
+            st.stop()
 
-    open_task_folder(task_id)
-    logger.info(tr("Video Generation Completed"))
-    scroll_to_bottom()
+        video_files = result.get("videos", [])
+        st.success(tr("Video Generation Completed"))
+        play_completion_alarm()
+        try:
+            if video_files:
+                player_cols = st.columns(len(video_files) * 2 + 1)
+                for i, url in enumerate(video_files):
+                    player_cols[i * 2 + 1].video(url)
+        except Exception:
+            pass
+
+        open_task_folder(task_id)
+        logger.info(tr("Video Generation Completed"))
+        scroll_to_bottom()
+    finally:
+        st.session_state["is_generating"] = False
 
 config.save_config()
 _save_persisted_session_state()
